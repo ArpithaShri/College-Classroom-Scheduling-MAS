@@ -49,6 +49,120 @@ pytest -v
 
 ---
 
+---
+
+## 🚀 Flask REST API (Phase 4 Step 2)
+
+### Starting the Flask Server
+```powershell
+python run.py
+```
+The server starts by default at `http://127.0.0.1:5000` with the SQLite database automatically initialized and seeded.
+
+### Base URL
+`http://127.0.0.1:5000/api`
+
+### Available Endpoints
+
+| Resource | Method | Endpoint | Description |
+| :--- | :--- | :--- | :--- |
+| **Health** | `GET` | `/api/health` | API status and liveness check |
+| **Departments** | `GET`, `POST` | `/api/departments` | List all / Create department |
+| | `GET`, `PUT`, `DELETE` | `/api/departments/<id>` | Read, update, delete department |
+| **Faculty** | `GET`, `POST` | `/api/faculty` | List all / Create faculty member |
+| | `GET`, `PUT`, `DELETE` | `/api/faculty/<id>` | Read, update, delete faculty member |
+| **Classrooms** | `GET`, `POST` | `/api/classrooms` | List all / Create classroom or lab |
+| | `GET`, `PUT`, `DELETE` | `/api/classrooms/<id>` | Read, update, delete classroom |
+| **Student Groups** | `GET`, `POST` | `/api/student-groups` | List all / Create student cohort |
+| | `GET`, `PUT`, `DELETE` | `/api/student-groups/<id>` | Read, update, delete student group |
+| **Courses** | `GET`, `POST` | `/api/courses` | List all / Create course requirement |
+| | `GET`, `PUT`, `DELETE` | `/api/courses/<id>` | Read, update, delete course |
+| **Timetables** | `GET` | `/api/timetables` | List all generated timetables |
+| | `GET`, `DELETE` | `/api/timetables/<id>` | Retrieve full timetable / Delete timetable |
+| **Scheduling** | `POST` | `/api/schedule/generate` | Generate optimal schedule with CSP engine |
+| **Rescheduling** | `POST` | `/api/schedule/reschedule` | Propose alternative slot on conflict |
+
+### Example: Generate a Timetable
+**Request:**
+```http
+POST /api/schedule/generate
+Content-Type: application/json
+
+{
+    "name": "Fall 2026 CS Timetable",
+    "academic_term": "Fall 2026"
+}
+```
+
+**Response (201 Created):**
+```json
+{
+    "success": true,
+    "timetable_id": 1,
+    "status": "SCHEDULED",
+    "fitness_score": 8.3738,
+    "statistics": {
+        "variables": 4,
+        "assignments_tried": 4,
+        "backtracks": 0,
+        "search_time_sec": 0.0099,
+        "total_utility": 8.3738
+    },
+    "assignments": [
+        {
+            "course_id": "CS301",
+            "course_name": "Machine Learning",
+            "faculty_id": "F001",
+            "student_group_id": "CSE-A",
+            "room_id": "R102",
+            "day": "Tuesday",
+            "start_time": "10:00",
+            "duration": 1,
+            "is_lab": false,
+            "enrollment": 55,
+            "status": "SCHEDULED"
+        }
+    ]
+}
+```
+
+### Example: Reschedule on Conflict
+**Request:**
+```http
+POST /api/schedule/reschedule
+Content-Type: application/json
+
+{
+    "course_id": "CS301",
+    "reason": "CLASSROOM_CAPACITY",
+    "current_room_id": "R101",
+    "current_day": "Monday",
+    "current_time": "10:00"
+}
+```
+
+**Response (200 OK):**
+```json
+{
+    "success": true,
+    "course_id": "CS301",
+    "course_name": "Machine Learning",
+    "reason": "CLASSROOM_CAPACITY",
+    "message": "Alternative assignment found successfully",
+    "alternative": {
+        "course_id": "CS301",
+        "course_name": "Machine Learning",
+        "room_id": "R102",
+        "day": "Tuesday",
+        "start_time": "10:00",
+        "duration": 1,
+        "utility_score": 2.1769
+    }
+}
+```
+
+---
+
 ## 📂 Project Structure
 
 ```
@@ -58,34 +172,16 @@ College-Classroom-Scheduling-MAS/
 ├── requirements.txt       # Project dependencies
 ├── config.py              # Configuration settings
 ├── run.py                 # Application entry point
+├── api/                   # Flask REST API layer (Phase 4 Step 2)
+│   ├── __init__.py        # Blueprint definition & CORS error handlers
+│   └── routes.py          # CRUD & scheduling endpoints
+├── app/                   # Flask application core & SQLAlchemy models
+│   ├── __init__.py        # App factory
+│   └── models.py          # Relational ORM models
+├── database/              # SQLite database management & seed data
 ├── agents/                # SPADE Multi-Agent System (Phase 3)
-│   ├── __init__.py        # Package exports
-│   ├── base_agent.py      # BaseAgent with identity & logging
-│   ├── communication.py   # Message protocol, performatives & logger
-│   ├── department_agent.py # DepartmentAgent
-│   ├── faculty_agent.py   # FacultyAgent
-│   ├── classroom_agent.py # ClassroomAgent
-│   ├── student_group_agent.py # StudentGroupAgent
-│   ├── timetable_coordinator.py # TimetableCoordinatorAgent
-│   └── demo_agents.py     # Interactive MAS demonstration scenarios
 ├── scheduler/             # CSP Scheduling Solver (Phase 2)
-│   ├── __init__.py        # Solver exports
-│   ├── domain.py          # Domain dataclasses (Course, Faculty, Room, etc.)
-│   ├── constraints.py     # Hard (H1-H8) and Soft (S1-S4) constraints
-│   ├── csp_solver.py      # CSPScheduler with MRV & backtracking
-│   └── demo.py            # CSP solver benchmark demo
-├── app/                   # Flask web application
-├── database/              # DB initialization & migrations
-├── tests/                 # 50+ Unit & integration tests
-│   ├── test_setup.py
-│   ├── test_csp_solver.py
-│   ├── test_base_agent.py
-│   ├── test_agent_communication.py
-│   ├── test_faculty_agent.py
-│   ├── test_classroom_agent.py
-│   ├── test_student_group_agent.py
-│   ├── test_department_agent.py
-│   └── test_coordinator_agent.py
+├── tests/                 # 70+ Unit, integration & API test suites
 └── docs/                  # Project specifications & reports
 ```
 
