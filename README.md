@@ -13,48 +13,39 @@ College classroom scheduling is an NP-hard combinatorial optimization problem ch
 ## 🏛️ System Architecture
 
 ### Multi-Agent System (SPADE Framework)
-1. **Department Agent**: Manages curriculum requirements, course offerings, and weekly credit hours.
-2. **Faculty Agent**: Negotiates faculty time availability, course proficiencies, and workload bounds.
-3. **Classroom Agent**: Tracks room capacity, lab equipment, projector availability, and physical room constraints.
-4. **Student Group Agent**: Prevents cohort overlaps, manages section sizes, and enforces daily study load limits.
-5. **Timetable Coordinator Agent**: Aggregates constraints, runs CSP/MRV scheduling engine, and resolves inter-agent conflicts.
+1. **Department Agent** (`DepartmentAgent`): Maintains course requirements, submits scheduling requests (`REQUEST`), tracks scheduled vs. pending/failed courses.
+2. **Faculty Agent** (`FacultyAgent`): Local knowledge of instructor availability, preferences, and teaching workload; detects double-booking and validates/rejects proposals.
+3. **Classroom Agent** (`ClassroomAgent`): Local knowledge of room capacity, room type (classroom/lab), and occupancy; prevents room double-booking and rejects insufficient capacity.
+4. **Student Group Agent** (`StudentGroupAgent`): Local knowledge of student cohort timetable; detects student timetable clashes and returns conflicts (`CONFLICT`).
+5. **Timetable Coordinator Agent** (`TimetableCoordinatorAgent`): Orchestrates decentralized negotiation across agents, consults CSP solver (`scheduler.CSPScheduler`) for alternative domain values, triggers dynamic rescheduling (`RESCHEDULE`), and confirms final schedules.
 
 ### Backend & Storage
-- **Flask**: REST API server and management portal.
+- **SPADE (v4.1+)**: Genuine Multi-Agent framework using FIPA-compliant ACL messaging over XMPP.
+- **CSP Engine**: Constraint Satisfaction Problem engine using MRV heuristic, forward checking, and multi-criteria utility scoring.
+- **Flask**: REST API server and management portal (Phases 4-5).
 - **Flask-SQLAlchemy / SQLite**: Relational storage for entities, preferences, assignments, and audit logs.
-- **CSP Solver**: Constraint Satisfaction Problem engine using MRV heuristic and forward checking.
 
 ---
 
-## 🚀 Setup & Installation (Phase 1)
+## ⚡ Multi-Agent Demonstration & Testing (Phase 3)
 
-### Prerequisites
-- Python 3.10+ (Verified on Python 3.14)
-- Git
+### Running the MAS Demos
+Execute the interactive demonstration showing Happy-Path negotiation, Classroom Capacity conflict resolution, and Student Timetable clash rescheduling:
+```powershell
+python agents/demo_agents.py
+```
 
-### Quickstart
-1. **Clone Repository**:
-   ```bash
-   git clone https://github.com/ArpithaShri/College-Classroom-Scheduling-MAS.git
-   cd College-Classroom-Scheduling-MAS
-   ```
+### Running Test Suite
+```powershell
+pytest -v
+```
 
-2. **Create and Activate Virtual Environment**:
-   ```powershell
-   # Windows (PowerShell)
-   python -m venv .venv
-   .\.venv\Scripts\Activate.ps1
-   ```
+---
 
-3. **Install Dependencies**:
-   ```bash
-   pip install -r requirements.txt
-   ```
+## 🌐 XMPP / SPADE Runtime Configuration
 
-4. **Run Verification Tests**:
-   ```bash
-   pytest
-   ```
+- **Local Development / Offline Mode**: Uses SPADE's agent abstractions and in-memory event dispatching alongside optional in-process `pyjabber` local server for complete zero-dependency offline development.
+- **External XMPP Server**: If using an external Prosody / Ejabberd server, configure `XMPP_SERVER` and `XMPP_PASSWORD` in `config.py` or `.env`.
 
 ---
 
@@ -67,24 +58,34 @@ College-Classroom-Scheduling-MAS/
 ├── requirements.txt       # Project dependencies
 ├── config.py              # Configuration settings
 ├── run.py                 # Application entry point
+├── agents/                # SPADE Multi-Agent System (Phase 3)
+│   ├── __init__.py        # Package exports
+│   ├── base_agent.py      # BaseAgent with identity & logging
+│   ├── communication.py   # Message protocol, performatives & logger
+│   ├── department_agent.py # DepartmentAgent
+│   ├── faculty_agent.py   # FacultyAgent
+│   ├── classroom_agent.py # ClassroomAgent
+│   ├── student_group_agent.py # StudentGroupAgent
+│   ├── timetable_coordinator.py # TimetableCoordinatorAgent
+│   └── demo_agents.py     # Interactive MAS demonstration scenarios
+├── scheduler/             # CSP Scheduling Solver (Phase 2)
+│   ├── __init__.py        # Solver exports
+│   ├── domain.py          # Domain dataclasses (Course, Faculty, Room, etc.)
+│   ├── constraints.py     # Hard (H1-H8) and Soft (S1-S4) constraints
+│   ├── csp_solver.py      # CSPScheduler with MRV & backtracking
+│   └── demo.py            # CSP solver benchmark demo
 ├── app/                   # Flask web application
-│   ├── __init__.py        # App factory
-│   ├── models.py          # Database models (placeholder)
-│   ├── routes/            # Blueprint routes
-│   │   └── __init__.py
-│   ├── static/            # Static assets (CSS, JS)
-│   │   ├── css/
-│   │   └── js/
-│   └── templates/         # HTML templates
-├── agents/                # SPADE Multi-Agent System
-│   └── __init__.py
-├── scheduler/             # CSP Scheduling Solver
-│   └── __init__.py
 ├── database/              # DB initialization & migrations
-│   └── __init__.py
-├── tests/                 # Unit & integration test suite
-│   ├── __init__.py
-│   └── test_setup.py      # Foundation verification tests
+├── tests/                 # 50+ Unit & integration tests
+│   ├── test_setup.py
+│   ├── test_csp_solver.py
+│   ├── test_base_agent.py
+│   ├── test_agent_communication.py
+│   ├── test_faculty_agent.py
+│   ├── test_classroom_agent.py
+│   ├── test_student_group_agent.py
+│   ├── test_department_agent.py
+│   └── test_coordinator_agent.py
 └── docs/                  # Project specifications & reports
 ```
 
@@ -92,3 +93,4 @@ College-Classroom-Scheduling-MAS/
 
 ## 📄 License
 Academic Final Year Project - All Rights Reserved.
+
