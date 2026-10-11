@@ -404,33 +404,58 @@ class TimetableCoordinatorAgent(BaseAgent):
                         candidates.append(t)
                 continue
 
-            # ----------------------------------------------------
-            # 4. Consensus Reached - Final Confirmations (CONFIRM Messages)
-            # ----------------------------------------------------
+           
+            # 4. Confirm with all participating agents and verify every reply.
             final_schedule = dict(current_proposal)
             final_schedule["status"] = "SCHEDULED"
 
-            # Confirm with Faculty via CONFIRM message
-            await self.send_and_await_reply(
-                to_jid=fac_jid,
-                performative=CONFIRM,
-                payload=final_schedule,
-                direct_target_agent=faculty_agent,
-            )
-            # Confirm with Classroom via CONFIRM message
-            await self.send_and_await_reply(
-                to_jid=cls_jid,
-                performative=CONFIRM,
-                payload=final_schedule,
-                direct_target_agent=cls_target,
-            )
-            # Confirm with Student Group via CONFIRM message
-            await self.send_and_await_reply(
-                to_jid=sg_jid,
-                performative=CONFIRM,
-                payload=final_schedule,
-                direct_target_agent=student_group_agent,
-            )
+            confirmation_targets = [
+                (fac_jid, faculty_agent, "Faculty"),
+                (cls_jid, cls_target, "Classroom"),
+                (sg_jid, student_group_agent, "Student group"),
+            ]
+
+            confirmation_failures = []
+
+            for target_jid, target_agent, agent_name in confirmation_targets:
+                response_type, response_payload = await self.send_and_await_reply(
+                    to_jid=target_jid,
+                    performative=CONFIRM,
+                    payload=final_schedule,
+                    direct_target_agent=target_agent,
+                )
+
+                if response_type != ACCEPT:
+                    confirmation_failures.append({
+                        "agent": agent_name,
+                        "response": response_type,
+                        "reason": response_payload.get(
+                            "reason", "Confirmation was not accepted"
+                        ),
+                    })
+
+            if confirmation_failures:
+                self.log_communication(
+                    direction="SENT",
+                    sender=str(self.jid),
+                    receiver=str(self.jid),
+                    performative=RESCHEDULE,
+                    payload={
+                        "course_id": course_id,
+                        "failed_candidate": final_schedule,
+                        "confirmation_failures": confirmation_failures,
+                    },
+                )
+                self.logger.warning(
+                    "Confirmation failed for %s: %s",
+                    course_id,
+                    confirmation_failures,
+                )
+                return (
+                    False,
+                    None,
+                    "Agent confirmation failed; assignment was not finalized.",
+                )
 
             self.confirmed_assignments.append(final_schedule)
 
@@ -444,7 +469,6 @@ class TimetableCoordinatorAgent(BaseAgent):
 
             return True, final_schedule, "Consensus reached across all agents."
 
-        return False, None, REASON_NO_FEASIBLE_SLOT
 
     async def coordinate_request(self, sender: Any, payload: Dict[str, Any]):
         """Asynchronously coordinate request when received through SPADE message loop."""

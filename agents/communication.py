@@ -190,8 +190,44 @@ class AgentMessageLogger:
             "status": status,
             "reason": reason or (payload.get("reason") if payload else None),
         }
+        
         self._logs.append(entry)
+
+        # Persist the message when a Flask application context is available.
+        # Keep standalone agents and unit tests working without Flask.
+        try:
+            from flask import has_app_context
+
+            if has_app_context():
+                from database.db import db
+                from app.models import AgentAuditLog
+
+                audit_entry = AgentAuditLog(
+                    timestamp=entry["timestamp"],
+                    sender=entry["sender"],
+                    receiver=entry["receiver"],
+                    message_type=entry["message_type"],
+                    course_id=entry["course"],
+                    status=entry["status"],
+                    reason=entry["reason"],
+                )
+                audit_entry.payload = entry["payload"]
+
+                db.session.add(audit_entry)
+                db.session.commit()
+        except Exception:
+            # A logging failure must not interrupt agent communication.
+            try:
+                from flask import has_app_context
+
+                if has_app_context():
+                    from database.db import db
+                    db.session.rollback()
+            except Exception:
+                pass
+
         return entry
+
 
     def get_logs(self) -> List[Dict[str, Any]]:
         """Return a copy of all recorded log entries."""

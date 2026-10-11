@@ -450,3 +450,45 @@ class AgentAuditLog(db.Model):
 
     def __repr__(self):
         return f"<AgentAuditLog [{self.timestamp}] {self.sender} -> {self.receiver} ({self.message_type})>"
+
+
+class Substitution(db.Model):
+    """Persistent record of a proposed or approved class substitution."""
+
+    __tablename__ = "substitutions"
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    timetable_id = db.Column(
+        db.Integer, db.ForeignKey("timetables.id"), nullable=True
+    )
+    course_id = db.Column(
+        db.String(50), db.ForeignKey("courses.id"), nullable=False
+    )
+    reason = db.Column(db.String(100), nullable=False, default="UNSPECIFIED")
+    original_room_id = db.Column(db.String(50), nullable=True)
+    original_day = db.Column(db.String(20), nullable=True)
+    original_time = db.Column(db.String(20), nullable=True)
+    proposed_room_id = db.Column(db.String(50), nullable=False)
+    proposed_day = db.Column(db.String(20), nullable=False)
+    proposed_time = db.Column(db.String(20), nullable=False)
+    status = db.Column(db.String(30), nullable=False, default="PROPOSED")
+    created_at = db.Column(db.DateTime, default=utc_now, nullable=False)
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "timetable_id": self.timetable_id,
+            "course_id": self.course_id,
+            "reason": self.reason,
+            "original_room_id": self.original_room_id,
+            "original_day": self.original_day,
+            "original_time": self.original_time,
+            "proposed_room_id": self.proposed_room_id,
+            "proposed_day": self.proposed_day,
+            "proposed_time": self.proposed_time,
+            "status": self.status,
+            "created_at": (
+                self.created_at.isoformat() if self.created_at else None
+            ),
+        }
+

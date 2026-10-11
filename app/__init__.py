@@ -1,7 +1,7 @@
 """Flask Application Package Factory."""
 
 import os
-from flask import Flask
+from flask import Flask, render_template
 
 from config import config_by_name
 from database.db import db
@@ -24,5 +24,8 @@ def create_app(config_name: str = "development") -> Flask:
     # Register blueprints
     from api import api_bp
     app.register_blueprint(api_bp)
+    @app.get("/")
+    def dashboard():
+        return render_template("index.html")
 
     return app

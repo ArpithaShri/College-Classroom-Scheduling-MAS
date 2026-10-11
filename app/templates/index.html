@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CampusFlow | Smart Timetable Management</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+  <link rel="preconnect" href="https://fonts.googleapis.com"><link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+</head>
+<body>
+  <header class="hero">
+    <div class="hero-dots dots-top"></div>
+    <h1><span>AI-Powered</span> Timetable Management</h1>
+    <p>Automatically generate optimized schedules, eliminate conflicts,<br class="desktop-only"> and balance workloads in seconds.</p>
+  </header>
+  <main class="app-shell">
+    <aside class="sidebar">
+      <div class="brand"><span class="brand-mark">✦</span><div><strong>CampusFlow</strong><small>SMART CAMPUS MAS</small></div></div>
+      <div class="profile"><div class="avatar">A</div><strong>Administrator</strong><small>Timetable Manager</small></div>
+      <nav>
+        <a class="nav-item active" href="#dashboard"><span>⌂</span> Dashboard</a>
+        <a class="nav-item" href="#timetable"><span>▦</span> Week Timetable</a>
+        <a class="nav-item" href="#analytics"><span>♙</span> Workload & Rooms</a>
+        <a class="nav-item" href="#conflicts"><span>⚠</span> Conflict Resolution</a>
+        <a class="nav-item" href="#analytics"><span>◈</span> Analytics & Insights</a>
+        <a class="nav-item" href="#quickActions"><span>⚡</span> Quick Actions</a>
+      </nav>
+      <div class="sidebar-bottom"><span class="online-dot"></span> Scheduling API connected</div>
+    </aside>
+    <section class="workspace" id="dashboard">
+      <div class="toolbar"><div><div class="eyebrow">ACADEMIC PLANNING</div><h2>Week Timetable</h2></div><div class="toolbar-actions"><button class="btn btn-light" id="refreshBtn">↻ Refresh</button><button class="btn btn-primary" id="generateBtn">✦ Generate Timetable</button></div></div>
+      <div class="stats-strip"><div><span class="dot green"></span><strong id="scheduledStat">—</strong> Classes Scheduled</div><div><span class="dot red"></span><strong id="conflictStat">0</strong> Conflicts Detected</div><div><span class="dot blue"></span><strong id="scoreStat">—</strong> Optimization Score</div></div>
+      <div class="main-grid">
+        <section class="timetable-panel" id="timetable">
+          <div class="table-scroll"><table class="schedule-table"><thead><tr><th class="period-label">Day / Period</th><th>Period 1<small>09:00–10:00</small></th><th>Period 2<small>10:00–11:00</small></th><th>Period 3<small>11:00–12:00</small></th><th>Period 4<small>12:00–13:00</small></th><th>Period 5<small>13:00–14:00</small></th><th>Period 6<small>14:00–15:00</small></th><th>Period 7<small>15:00–16:00</small></th></tr></thead><tbody id="timetableBody"><tr><td colspan="8" class="loading-cell">Loading your saved timetable…</td></tr></tbody></table></div>
+          <div class="table-footer"><span class="legend"><i class="legend-dot"></i> Scheduled class</span><span id="timetableCaption">Loading timetable data from your Flask API</span></div>
+        </section>
+        <aside class="conflict-panel" id="conflicts"><div class="panel-heading"><div><h3>Detected Conflicts</h3><small>Review and request alternatives</small></div><span class="count-pill" id="conflictPill">0</span></div><div class="filter-row"><button class="filter-chip selected">All</button><button class="filter-chip">Faculty</button><button class="filter-chip">Rooms</button><button class="filter-chip">Time</button></div><div id="conflictList" class="conflict-list"><div class="empty-state">No conflict reports yet. Try generating or rescheduling a timetable.</div></div><div class="reschedule-box"><h4>Find an alternative slot</h4><label for="courseSelect">Course</label><select id="courseSelect"><option value="">Loading courses…</option></select><label for="reasonSelect">Conflict type</label><select id="reasonSelect"><option value="CLASSROOM_CAPACITY">Classroom capacity</option><option value="FACULTY_UNAVAILABLE">Faculty unavailable</option><option value="STUDENT_GROUP_CONFLICT">Student group conflict</option><option value="UNSPECIFIED_CONFLICT">Other conflict</option></select><button class="btn btn-primary full-width" id="rescheduleBtn">Find Alternative</button><div id="rescheduleResult" class="result-box" aria-live="polite"></div></div></aside>
+      </div>
+      <section class="analytics-grid" id="analytics">
+        <article class="analytics-card workload-card"><div class="analytics-heading"><div><h3>Workload Summary</h3><small>Scheduled teaching hours by faculty</small></div><span class="mini-badge">This timetable</span></div><div class="workload-content"><div class="donut" id="workloadDonut"><div><strong id="workloadHours">0</strong><small>Hours</small></div></div><div class="workload-legend" id="workloadLegend"><span class="muted-note">Load data will appear after timetable loads.</span></div></div></article>
+        <article class="analytics-card"><div class="analytics-heading"><div><h3>Room Utilization</h3><small>Share of scheduled sessions by room</small></div><span class="mini-badge">This timetable</span></div><div class="utilization-list" id="roomUtilization"><span class="muted-note">Loading room data…</span></div><button class="text-action" id="viewRoomsBtn" type="button">View room summary →</button></article>
+        <article class="analytics-card substitutions-card"><div class="analytics-heading"><div><h3>Recent Adjustments</h3><small>Alternative slots proposed this session</small></div><span class="mini-badge" id="adjustmentCount">0</span></div><div class="adjustment-list" id="adjustmentList"><div class="muted-note">No alternatives requested yet.</div></div><button class="text-action" id="viewAdjustmentsBtn" type="button">View adjustment history →</button></article>
+        <article class="analytics-card status-card"><div class="analytics-heading"><div><h3>Timetable Status</h3><small>Latest API and schedule checks</small></div><span class="status-indicator"><i></i> Online</span></div><div class="status-list" id="statusList"><div><span class="status-check">✓</span><span><strong>Scheduling API</strong><small>Connected to Flask</small></span></div><div><span class="status-check">✓</span><span><strong>Saved timetable</strong><small>Loading status…</small></span></div><div><span class="status-check">✓</span><span><strong>Hard constraints</strong><small>Validated by scheduler on generation</small></span></div><div><span class="status-check neutral">•</span><span><strong>Conflict reports</strong><small>No dedicated conflict-list endpoint</small></span></div></div></article>
+      </section>
+      <section class="quick-actions-section" id="quickActions"><div class="section-title"><div><h3>Quick Actions</h3><small>Common timetable management tasks</small></div></div><div class="quick-actions-grid"><button class="quick-action" id="quickGenerateBtn"><span class="quick-icon blue-icon">✦</span><span><strong>Generate Timetable</strong><small>Run the CSP scheduler</small></span><span class="action-arrow">→</span></button><button class="quick-action" id="quickRescheduleBtn"><span class="quick-icon green-icon">↻</span><span><strong>Find Alternative</strong><small>Propose a conflict-free slot</small></span><span class="action-arrow">→</span></button><button class="quick-action" id="printBtn"><span class="quick-icon purple-icon">▤</span><span><strong>Print Timetable</strong><small>Print or save as PDF</small></span><span class="action-arrow">→</span></button><button class="quick-action" id="exportBtn"><span class="quick-icon orange-icon">⇩</span><span><strong>Export CSV</strong><small>Download assignments</small></span><span class="action-arrow">→</span></button></div></section>
+      <section class="feature-row" id="features"><article class="feature-card"><span class="feature-icon blue-icon">ϟ</span><div><strong>Fast Generation</strong><small>CSP-powered schedule generation</small></div></article><article class="feature-card"><span class="feature-icon green-icon">✓</span><div><strong>Constraint-Aware</strong><small>Hard constraints validated on generation</small></div></article><article class="feature-card"><span class="feature-icon purple-icon">▥</span><div><strong>Optimized Schedules</strong><small>Utility scoring ranks candidates</small></div></article><article class="feature-card"><span class="feature-icon orange-icon">↻</span><div><strong>Easy Adjustments</strong><small>Request and review alternative slots</small></div></article></section>
+      <div id="toast" class="toast" role="status"></div>
+      <footer>CampusFlow · College Classroom Scheduling MAS · CSP Scheduler</footer>
+    </section>
+  </main>
+  <script src="{{ url_for('static', filename='js/script.js') }}"></script>
+</body></html>

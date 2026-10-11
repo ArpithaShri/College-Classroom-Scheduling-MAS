@@ -6,11 +6,14 @@ and Rescheduling negotiation endpoints.
 """
 
 from typing import Dict, Any, List, Optional, Tuple, Set
-from flask import jsonify, request
+from flask import jsonify, request, current_app
 
 from . import api_bp
 from database.db import db
-from app.models import Department, Faculty, Room, StudentGroup, Course, Timetable, Assignment
+from app.models import (
+    Department, Faculty, Room, StudentGroup, Course,
+    Timetable, Assignment, Substitution, AgentAuditLog
+)   
 from scheduler.domain import (
     SchedulingProblem,
     Course as DomainCourse,
@@ -36,6 +39,34 @@ def health_check():
         "success": True,
         "message": "College Classroom Scheduling API is running",
     }), 200
+
+
+@api_bp.route("/agent-logs", methods=["GET"])
+def get_agent_logs():
+    """Retrieve persisted multi-agent communication audit logs."""
+    limit = request.args.get("limit", default=100, type=int)
+
+    if limit is None or limit < 1:
+        return jsonify({
+            "success": False,
+            "error": "The limit parameter must be a positive integer",
+        }), 400
+
+    limit = min(limit, 500)
+
+    logs = (
+        AgentAuditLog.query
+        .order_by(AgentAuditLog.id.desc())
+        .limit(limit)
+        .all()
+    )
+
+    return jsonify({
+        "success": True,
+        "count": len(logs),
+        "logs": [log.to_dict() for log in logs],
+    }), 200
+
 
 
 # ============================================================================
@@ -1224,3 +1255,247 @@ def reschedule_conflict():
             "utility_score": round(best_score, 4),
         },
     }), 200
+    
+# ============================================================================
+# SUBSTITUTION HISTORY
+# ============================================================================
+
+@api_bp.route("/substitutions", methods=["GET"])
+def get_substitutions():
+    """Return saved substitution proposals, newest first."""
+    items = Substitution.query.order_by(
+        Substitution.created_at.desc()
+    ).all()
+
+    return jsonify({
+        "success": True,
+        "count": len(items),
+        "substitutions": [item.to_dict() for item in items],
+    }), 200
+
+
+@api_bp.route("/substitutions", methods=["POST"])
+def create_substitution():
+    """Persist a proposed alternative returned by the rescheduling API."""
+    data = request.get_json(silent=True)
+
+    if not isinstance(data, dict):
+        return jsonify({
+            "success": False,
+            "error": "A JSON object is required",
+        }), 400
+
+    course_id = str(data.get("course_id", "")).strip()
+    proposed_room_id = str(data.get("proposed_room_id", "")).strip()
+    proposed_day = str(data.get("proposed_day", "")).strip()
+    proposed_time = str(data.get("proposed_time", "")).strip()
+
+    if not all([course_id, proposed_room_id, proposed_day, proposed_time]):
+        return jsonify({
+            "success": False,
+            "error": (
+                "Required fields: course_id, proposed_room_id, "
+                "proposed_day, proposed_time"
+            ),
+        }), 400
+
+    if not db.session.get(Course, course_id):
+        return jsonify({
+            "success": False,
+            "error": f"Course '{course_id}' not found",
+        }), 404
+
+    timetable_id = data.get("timetable_id")
+    if timetable_id is not None:
+        try:
+            timetable_id = int(timetable_id)
+        except (ValueError, TypeError):
+            return jsonify({
+                "success": False,
+                "error": "timetable_id must be an integer",
+            }), 400
+
+        if not db.session.get(Timetable, timetable_id):
+            return jsonify({
+                "success": False,
+                "error": f"Timetable {timetable_id} not found",
+            }), 404
+
+    item = Substitution(
+        timetable_id=timetable_id,
+        course_id=course_id,
+        reason=str(data.get("reason", "UNSPECIFIED")),
+        original_room_id=data.get("original_room_id"),
+        original_day=data.get("original_day"),
+        original_time=data.get("original_time"),
+        proposed_room_id=proposed_room_id,
+        proposed_day=proposed_day,
+        proposed_time=proposed_time,
+        status="PROPOSED",
+    )
+
+    try:
+        db.session.add(item)
+        db.session.commit()
+        return jsonify({
+            "success": True,
+            "substitution": item.to_dict(),
+        }), 201
+    except Exception:
+        db.session.rollback()
+        return jsonify({
+            "success": False,
+            "error": "Could not save substitution proposal",
+        }), 500
+
+# ============================================================================
+# CONFLICT DETECTION AND REPORTING
+# ============================================================================
+
+@api_bp.route("/conflicts", methods=["GET"])
+def get_conflicts():
+    """
+    Detect scheduling conflicts in a saved timetable.
+
+    Detects:
+    1. Room clashes
+    2. Faculty clashes
+    3. Student-group clashes
+    4. Room-capacity violations
+    """
+    try:
+        timetable_id = request.args.get("timetable_id", type=int)
+
+        if timetable_id is None:
+            latest = Timetable.query.order_by(Timetable.id.desc()).first()
+
+            if latest is None:
+                return jsonify({
+                    "success": True,
+                    "count": 0,
+                    "conflicts": [],
+                    "message": "No timetable has been generated yet."
+                }), 200
+
+            timetable_id = latest.id
+
+        timetable = db.session.get(Timetable, timetable_id)
+
+        if timetable is None:
+            return jsonify({
+                "success": False,
+                "error": f"Timetable {timetable_id} not found"
+            }), 404
+
+        assignments_list = Assignment.query.filter_by(
+            timetable_id=timetable_id
+        ).all()
+
+        conflicts = []
+
+        def to_minutes(value):
+            try:
+                hour, minute = map(int, str(value).split(":")[:2])
+                return hour * 60 + minute
+            except (ValueError, TypeError):
+                return None
+
+        def overlaps(first, second):
+            first_start = to_minutes(first.start_time)
+            second_start = to_minutes(second.start_time)
+
+            if first_start is None or second_start is None:
+                return False
+
+            first_end = first_start + max(1, int(first.duration or 1)) * 60
+            second_end = second_start + max(1, int(second.duration or 1)) * 60
+
+            return first_start < second_end and second_start < first_end
+
+        # Check each assignment for capacity violations.
+        for assignment in assignments_list:
+            room = db.session.get(Room, assignment.room_id)
+
+            if room and int(assignment.enrollment or 0) > int(room.capacity):
+                conflicts.append({
+                    "type": "ROOM_CAPACITY",
+                    "title": "Room capacity exceeded",
+                    "message": (
+                        f"{assignment.course_name} has "
+                        f"{assignment.enrollment} students, but room "
+                        f"{room.id} accommodates only {room.capacity}."
+                    ),
+                    "course_id": assignment.course_id,
+                    "course_name": assignment.course_name,
+                    "room_id": room.id,
+                    "day": assignment.day,
+                    "start_time": assignment.start_time,
+                    "enrollment": assignment.enrollment,
+                    "room_capacity": room.capacity
+                })
+
+        # Check pairs of assignments for overlapping time slots.
+        for index, first in enumerate(assignments_list):
+            for second in assignments_list[index + 1:]:
+                if first.day != second.day:
+                    continue
+
+                if not overlaps(first, second):
+                    continue
+
+                shared_checks = [
+                    (
+                        "ROOM_CLASH",
+                        first.room_id == second.room_id,
+                        "Room clash",
+                        f"Both {first.course_name} and {second.course_name} "
+                        f"are assigned to room {first.room_id} at overlapping times."
+                    ),
+                    (
+                        "FACULTY_CLASH",
+                        first.faculty_id == second.faculty_id,
+                        "Faculty clash",
+                        f"Faculty member {first.faculty_id} has overlapping "
+                        f"classes: {first.course_name} and {second.course_name}."
+                    ),
+                    (
+                        "STUDENT_GROUP_CLASH",
+                        first.student_group_id == second.student_group_id,
+                        "Student group clash",
+                        f"Student group {first.student_group_id} has overlapping "
+                        f"classes: {first.course_name} and {second.course_name}."
+                    )
+                ]
+
+                for conflict_type, matched, title, message in shared_checks:
+                    if matched:
+                        conflicts.append({
+                            "type": conflict_type,
+                            "title": title,
+                            "message": message,
+                            "course_id": first.course_id,
+                            "course_name": first.course_name,
+                            "other_course_id": second.course_id,
+                            "other_course_name": second.course_name,
+                            "day": first.day,
+                            "start_time": first.start_time,
+                            "room_id": first.room_id,
+                            "other_room_id": second.room_id
+                        })
+
+        return jsonify({
+            "success": True,
+            "timetable_id": timetable_id,
+            "count": len(conflicts),
+            "conflicts": conflicts
+        }), 200
+
+    except Exception:
+        db.session.rollback()
+        current_app.logger.exception("Conflict detection failed")
+
+        return jsonify({
+            "success": False,
+            "error": "Could not detect scheduling conflicts."
+        }), 500
+

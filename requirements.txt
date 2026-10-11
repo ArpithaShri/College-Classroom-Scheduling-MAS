@@ -3,7 +3,7 @@ spade==4.1.2
 greenlet>=3.1.0
 
 # Backend Web Framework & ORM
-flask>=2.3.0,<3.0.0
+flask==2.2.5
 flask-sqlalchemy>=3.1.0
 
 # Testing
