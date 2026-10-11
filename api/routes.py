@@ -5,7 +5,9 @@ Student Groups, Courses, and Timetables, as well as CSP-driven Schedule Generati
 and Rescheduling negotiation endpoints.
 """
 
-from typing import Dict, Any, List, Optional, Tuple, Set
+import asyncio
+from datetime import datetime
+from typing import List, Tuple, Set
 from flask import jsonify, request, current_app
 
 from . import api_bp
@@ -16,16 +18,17 @@ from app.models import (
 )   
 from scheduler.domain import (
     SchedulingProblem,
-    Course as DomainCourse,
-    Faculty as DomainFaculty,
-    Room as DomainRoom,
-    StudentGroup as DomainStudentGroup,
     ScheduleValue,
     Assignment as DomainAssignment,
     generate_course_domain,
 )
 from scheduler.constraints import HardConstraintValidator, SoftConstraintEvaluator, UtilityWeights
-from scheduler.csp_solver import CSPScheduler
+from agents.timetable_coordinator import AgentCommunicationError
+from services.mas_scheduling_service import (
+    MASAgentStartupError,
+    MASSchedulingError,
+    generate_timetable_with_mas,
+)
 
 
 # ============================================================================
@@ -1015,16 +1018,39 @@ def delete_timetable(timetable_id: int):
 # CSP SCHEDULING ENGINE INTEGRATION
 # ============================================================================
 
+def _persist_schedule_failure_outcome(
+    mode: str, status: str, reason: str
+) -> None:
+    """Persist a failure outcome in a fresh transaction after request rollback."""
+    entry = AgentAuditLog(
+        timestamp=datetime.now().strftime("%H:%M:%S"),
+        sender="schedule_api",
+        receiver="timetable_scheduler",
+        message_type="SCHEDULE_OUTCOME",
+        status=status,
+        reason=reason,
+    )
+    entry.payload = {"mode": mode, "outcome": status, "reason": reason}
+    try:
+        db.session.add(entry)
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        current_app.logger.exception(
+            "Could not persist scheduling failure audit outcome"
+        )
+
+
 @api_bp.route("/schedule/generate", methods=["POST"])
 def generate_schedule():
     """
-    Generate an optimal conflict-free college timetable using the CSP engine.
+    Generate and persist a timetable after CSP proposals and agent negotiation.
 
     Workflow:
     1. Loads all Courses, Faculty, Classrooms, and Student Groups from database.
     2. Converts models to scheduler domain objects.
-    3. Solves the scheduling problem via CSPScheduler (MRV + backtracking + soft scoring).
-    4. Persists the Timetable session and Assignment records in an atomic transaction.
+    3. Uses the MAS service to solve and negotiate proposals with scheduling agents.
+    4. Persists only confirmed assignments in an atomic transaction.
     5. Returns the complete generated timetable as JSON.
     """
     data = request.get_json(silent=True) or {}
@@ -1063,31 +1089,28 @@ def generate_schedule():
         student_groups=domain_student_groups,
     )
 
-    # 4. Invoke existing CSP Solver
-    scheduler = CSPScheduler(problem=problem, enable_logging=False)
-    result = scheduler.solve()
+    live_xmpp = bool(current_app.config.get("MAS_LIVE_XMPP", False))
 
-    if not result.success:
-        return jsonify({
-            "success": False,
-            "error": "Scheduling failed: Problem is infeasible or over-constrained",
-            "conflicts": result.conflicts,
-            "statistics": result.statistics,
-        }), 409
-
-    # 5. Persist the generated schedule atomically
     try:
+        result = asyncio.run(
+            generate_timetable_with_mas(
+                problem=problem,
+                password=current_app.config.get("XMPP_PASSWORD"),
+                xmpp_domain=current_app.config.get("XMPP_DOMAIN"),
+                live_xmpp=live_xmpp,
+            )
+        )
+
         timetable = Timetable(
             name=name,
             academic_term=academic_term,
             status="SCHEDULED",
-            fitness_score=result.statistics.get("total_utility", 0.0),
+            fitness_score=result["statistics"].get("total_utility", 0.0),
         )
         db.session.add(timetable)
         db.session.flush()
 
-        # Create Assignment records linked to Timetable
-        for item in result.schedule:
+        for item in result["assignments"]:
             assignment = Assignment(
                 timetable_id=timetable.id,
                 course_id=item["course_id"],
@@ -1111,15 +1134,50 @@ def generate_schedule():
             "timetable_id": timetable.id,
             "status": timetable.status,
             "fitness_score": timetable.fitness_score,
-            "statistics": result.statistics,
+            "statistics": result["statistics"],
             "assignments": [a.to_dict() for a in timetable.assignments],
+            "mode": result["mode"],
         }), 201
 
-    except Exception:
+    except MASAgentStartupError as exc:
         db.session.rollback()
+        _persist_schedule_failure_outcome(
+            "live_xmpp", "APPLICATION:AGENT_STARTUP_FAILED", str(exc)
+        )
         return jsonify({
             "success": False,
-            "error": "Database error while persisting timetable assignments",
+            "error": str(exc),
+            "mode": "live_xmpp",
+        }), 503
+    except AgentCommunicationError as exc:
+        db.session.rollback()
+        _persist_schedule_failure_outcome(
+            "live_xmpp", "APPLICATION:COMMUNICATION_FAILED", str(exc)
+        )
+        return jsonify({
+            "success": False,
+            "error": str(exc),
+            "mode": "live_xmpp",
+        }), 503
+    except MASSchedulingError as exc:
+        db.session.rollback()
+        _persist_schedule_failure_outcome(
+            "live_xmpp" if live_xmpp else "in_process",
+            "APPLICATION:SCHEDULING_REJECTED",
+            str(exc),
+        )
+        return jsonify({
+            "success": False,
+            "error": str(exc),
+            "conflicts": exc.conflicts or [],
+            "statistics": exc.statistics or {},
+        }), 409
+    except Exception:
+        db.session.rollback()
+        current_app.logger.exception("Could not generate timetable")
+        return jsonify({
+            "success": False,
+            "error": "Could not generate or persist the timetable",
         }), 500
 
 
@@ -1194,12 +1252,16 @@ def reschedule_conflict():
     timetable_id = data.get("timetable_id")
     current_assignments: List[DomainAssignment] = []
 
-    if timetable_id:
+    if timetable_id is not None:
         tt = db.session.get(Timetable, timetable_id)
-        if tt:
-            current_assignments = [
-                a.to_domain() for a in tt.assignments if a.course_id != course_id
-            ]
+        if tt is None:
+            return jsonify({
+                "success": False,
+                "error": f"Timetable {timetable_id} not found",
+            }), 404
+        current_assignments = [
+            a.to_domain() for a in tt.assignments if a.course_id != course_id
+        ]
     else:
         latest_tt = Timetable.query.order_by(Timetable.id.desc()).first()
         if latest_tt:
@@ -1498,4 +1560,3 @@ def get_conflicts():
             "success": False,
             "error": "Could not detect scheduling conflicts."
         }), 500
-

@@ -27,6 +27,7 @@ RESCHEDULE = "RESCHEDULE"
 ALLOCATE = "ALLOCATE"
 CHECK_TIMETABLE = "CHECK_TIMETABLE"
 CONFIRM = "CONFIRM"
+CANCEL = "CANCEL"
 FINAL_ACCEPT = "FINAL_ACCEPT"
 
 ALL_PERFORMATIVES = [
@@ -40,6 +41,7 @@ ALL_PERFORMATIVES = [
     ALLOCATE,
     CHECK_TIMETABLE,
     CONFIRM,
+    CANCEL,
     FINAL_ACCEPT,
 ]
 
@@ -178,7 +180,7 @@ class AgentMessageLogger:
         status: str = "",
         reason: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Record an inter-agent message interaction."""
+        """Record a communication or application-level audit event."""
         timestamp = datetime.now().strftime("%H:%M:%S")
         entry = {
             "timestamp": timestamp,
@@ -193,38 +195,25 @@ class AgentMessageLogger:
         
         self._logs.append(entry)
 
-        # Persist the message when a Flask application context is available.
-        # Keep standalone agents and unit tests working without Flask.
-        try:
-            from flask import has_app_context
+        # Share the caller's transaction so an audit write cannot commit a
+        # partially generated timetable.
+        from flask import has_app_context
 
-            if has_app_context():
-                from database.db import db
-                from app.models import AgentAuditLog
+        if has_app_context():
+            from database.db import db
+            from app.models import AgentAuditLog
 
-                audit_entry = AgentAuditLog(
-                    timestamp=entry["timestamp"],
-                    sender=entry["sender"],
-                    receiver=entry["receiver"],
-                    message_type=entry["message_type"],
-                    course_id=entry["course"],
-                    status=entry["status"],
-                    reason=entry["reason"],
-                )
-                audit_entry.payload = entry["payload"]
-
-                db.session.add(audit_entry)
-                db.session.commit()
-        except Exception:
-            # A logging failure must not interrupt agent communication.
-            try:
-                from flask import has_app_context
-
-                if has_app_context():
-                    from database.db import db
-                    db.session.rollback()
-            except Exception:
-                pass
+            audit_entry = AgentAuditLog(
+                timestamp=entry["timestamp"],
+                sender=entry["sender"],
+                receiver=entry["receiver"],
+                message_type=entry["message_type"],
+                course_id=entry["course"],
+                status=entry["status"],
+                reason=entry["reason"],
+            )
+            audit_entry.payload = entry["payload"]
+            db.session.add(audit_entry)
 
         return entry
 

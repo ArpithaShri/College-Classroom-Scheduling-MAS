@@ -3,14 +3,32 @@
 
 import pytest
 import asyncio
+from collections import deque
 
-from agents.timetable_coordinator import TimetableCoordinatorAgent
+from agents.timetable_coordinator import (
+    AgentCommunicationError,
+    CoordinatorRequestHandler,
+    TimetableCoordinatorAgent,
+)
 from agents.department_agent import DepartmentAgent
 from agents.faculty_agent import FacultyAgent
 from agents.classroom_agent import ClassroomAgent
 from agents.student_group_agent import StudentGroupAgent
-from agents.communication import ACCEPT, REJECT, CONFIRM
-from scheduler.domain import SchedulingProblem, Room, TimeSlot
+from agents.communication import (
+    ACCEPT,
+    REJECT,
+    CONFIRM,
+    create_spade_message,
+    parse_spade_message,
+)
+from scheduler.domain import (
+    Course,
+    Faculty,
+    Room,
+    SchedulingProblem,
+    StudentGroup,
+    TimeSlot,
+)
 
 
 def test_coordinator_initialization_and_registry():
@@ -306,7 +324,246 @@ def test_coordinator_does_not_finalize_when_confirmation_is_rejected(
 
         assert success is False
         assert assignment is None
-        assert "confirmation failed" in reason.lower()
+        assert "no candidate passed" in reason.lower()
         assert coordinator.confirmed_assignments == []
+
+    asyncio.run(run_test())
+
+
+def test_confirmation_rejection_cancels_partial_booking_and_tries_alternative():
+    problem = SchedulingProblem(
+        courses=[
+            Course(
+                id="CS301",
+                name="Machine Learning",
+                faculty_id="F001",
+                student_group_id="CSE-A",
+                enrollment=30,
+                duration=1,
+            )
+        ],
+        faculty=[Faculty(id="F001", name="Faculty One")],
+        rooms=[Room(id="R101", name="Room 101", capacity=60)],
+        student_groups=[StudentGroup(id="CSE-A", name="Section A")],
+    )
+    coordinator = TimetableCoordinatorAgent(
+        jid="coordinator@localhost",
+        scheduling_problem=problem,
+    )
+    faculty_agent = FacultyAgent(
+        jid="faculty_f001@localhost",
+        faculty_id="F001",
+    )
+    room_agent = ClassroomAgent(
+        jid="classroom_r101@localhost",
+        room_id="R101",
+        capacity=60,
+    )
+    student_agent = StudentGroupAgent(
+        jid="studentgroup_csea@localhost",
+        group_id="CSE-A",
+    )
+
+    original_confirm = room_agent.handle_confirm
+    rejected_first_confirmation = False
+
+    def reject_first_room_confirmation(payload):
+        nonlocal rejected_first_confirmation
+        if not rejected_first_confirmation:
+            rejected_first_confirmation = True
+            return REJECT, {
+                **payload,
+                "reason": "Room became unavailable during confirmation",
+            }
+        return original_confirm(payload)
+
+    room_agent.handle_confirm = reject_first_room_confirmation
+
+    async def run_test():
+        success, assignment, reason = (
+            await coordinator.coordinate_course_negotiation(
+                request_payload={
+                    "course_id": "CS301",
+                    "course_name": "Machine Learning",
+                    "faculty_id": "F001",
+                    "student_group_id": "CSE-A",
+                    "enrollment": 30,
+                    "duration": 1,
+                    "day": "Monday",
+                    "start_time": "10:00",
+                    "room_id": "R101",
+                },
+                faculty_agent=faculty_agent,
+                classroom_agents_map={"R101": room_agent},
+                student_group_agent=student_agent,
+            )
+        )
+
+        assert success is True, reason
+        assert assignment is not None
+        assert (assignment["day"], assignment["start_time"]) != (
+            "Monday",
+            "10:00",
+        )
+        assert assignment["status"] == "SCHEDULED"
+        assert coordinator.confirmed_assignments == [assignment]
+        assert faculty_agent.existing_assignments == {
+            (assignment["day"], assignment["start_time"]): "CS301"
+        }
+        assert room_agent.current_bookings == {
+            (assignment["day"], assignment["start_time"]): "CS301"
+        }
+        assert student_agent.existing_timetable == {
+            (assignment["day"], assignment["start_time"]): "Machine Learning"
+        }
+
+    asyncio.run(run_test())
+
+
+class _CoordinatorBehaviorStub:
+    def __init__(self, agent, send_error=None):
+        self.agent = agent
+        self.send_error = send_error
+        self.sent = []
+        self.incoming = deque()
+
+    async def send(self, message):
+        if self.send_error is not None:
+            raise self.send_error
+        self.sent.append(message)
+
+    async def receive(self, timeout=None):
+        return self.incoming.popleft()
+
+
+def test_live_message_send_failure_is_reported_and_pending_reply_removed():
+    coordinator = TimetableCoordinatorAgent(
+        jid="coordinator@example.test",
+    )
+    behavior = _CoordinatorBehaviorStub(
+        coordinator, send_error=OSError("transport unavailable")
+    )
+
+    async def run_test():
+        with pytest.raises(AgentCommunicationError, match="Could not transmit"):
+            await CoordinatorRequestHandler.send_and_wait(
+                behavior,
+                to_jid="faculty@example.test",
+                performative="PROPOSE",
+                payload={"course_id": "CS301"},
+                timeout=0.1,
+            )
+
+        assert coordinator._pending_replies == {}
+        assert any(
+            entry["status"] == "SENT:FAILED"
+            for entry in coordinator.message_history
+        )
+
+    asyncio.run(run_test())
+
+
+def test_live_reply_timeout_is_reported_and_pending_reply_removed():
+    coordinator = TimetableCoordinatorAgent(
+        jid="coordinator@example.test",
+    )
+    behavior = _CoordinatorBehaviorStub(coordinator)
+
+    async def run_test():
+        with pytest.raises(AgentCommunicationError, match="Timed out waiting"):
+            await CoordinatorRequestHandler.send_and_wait(
+                behavior,
+                to_jid="faculty@example.test",
+                performative="PROPOSE",
+                payload={"course_id": "CS301"},
+                timeout=0.001,
+            )
+
+        assert coordinator._pending_replies == {}
+        assert any(
+            entry["status"] == "LIVE:TIMEOUT"
+            for entry in coordinator.message_history
+        )
+
+    asyncio.run(run_test())
+
+
+def test_live_reply_rejects_mismatched_sender_and_correlation_id():
+    coordinator = TimetableCoordinatorAgent(
+        jid="coordinator@example.test",
+    )
+    behavior = _CoordinatorBehaviorStub(coordinator)
+
+    async def run_test():
+        exchange = asyncio.create_task(
+            CoordinatorRequestHandler.send_and_wait(
+                behavior,
+                to_jid="faculty@example.test",
+                performative="PROPOSE",
+                payload={"course_id": "CS301"},
+                timeout=0.5,
+            )
+        )
+        await asyncio.sleep(0)
+        request = behavior.sent[0]
+        _, request_payload = parse_spade_message(request)
+        correlation_id = request_payload["correlation_id"]
+
+        behavior.incoming.append(
+            create_spade_message(
+                to=str(coordinator.jid),
+                sender="attacker@example.test",
+                performative=ACCEPT,
+                payload={"correlation_id": correlation_id},
+                thread=correlation_id,
+            )
+        )
+        await CoordinatorRequestHandler.run(behavior)
+
+        behavior.incoming.append(
+            create_spade_message(
+                to=str(coordinator.jid),
+                sender="faculty@example.test",
+                performative=ACCEPT,
+                payload={"correlation_id": correlation_id},
+                thread="wrong-correlation",
+            )
+        )
+        await CoordinatorRequestHandler.run(behavior)
+
+        behavior.incoming.append(
+            create_spade_message(
+                to="another-agent@example.test",
+                sender="faculty@example.test",
+                performative=ACCEPT,
+                payload={"correlation_id": correlation_id},
+                thread=correlation_id,
+            )
+        )
+        await CoordinatorRequestHandler.run(behavior)
+
+        assert not exchange.done()
+        assert sum(
+            entry["status"] == "LIVE:UNMATCHED"
+            for entry in coordinator.message_history
+        ) == 3
+
+        behavior.incoming.append(
+            create_spade_message(
+                to=str(coordinator.jid),
+                sender="faculty@example.test",
+                performative=ACCEPT,
+                payload={
+                    "correlation_id": correlation_id,
+                    "decision": "accepted",
+                },
+                thread=correlation_id,
+            )
+        )
+        await CoordinatorRequestHandler.run(behavior)
+
+        response_type, response_payload = await exchange
+        assert response_type == ACCEPT
+        assert response_payload["decision"] == "accepted"
 
     asyncio.run(run_test())

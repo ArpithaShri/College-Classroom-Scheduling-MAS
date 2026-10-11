@@ -176,10 +176,9 @@ def configure_fakes(monkeypatch):
 # ---------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_schedule_returns_confirmed_assignments():
+async def test_in_process_schedule_returns_confirmed_assignments():
     service = mas_service.MASTimetableService(
         make_problem(),
-        live_xmpp=True,
     )
 
     result = await service.schedule()
@@ -189,10 +188,10 @@ async def test_schedule_returns_confirmed_assignments():
     assert result["assignments"][0]["course_id"] == "C1"
     assert result["agent_count"] == 4
     assert result["negotiated_count"] == 1
-    assert result["mode"] == "live_xmpp"
+    assert result["mode"] == "in_process"
 
-    # All four agents should be stopped after scheduling.
-    assert len(FakeAgent.stopped) == 4
+    # In-process agents are not started as SPADE/XMPP processes.
+    assert FakeAgent.stopped == []
 
 
 @pytest.mark.asyncio
@@ -212,6 +211,34 @@ async def test_schedule_fails_when_csp_is_infeasible():
 async def test_schedule_fails_when_negotiation_is_rejected():
     FakeCoordinator.negotiation_success = False
 
+    service = mas_service.MASTimetableService(make_problem())
+
+    with pytest.raises(
+        mas_service.MASSchedulingError,
+        match="Negotiation failed",
+    ):
+        await service.schedule()
+
+    assert FakeAgent.stopped == []
+
+
+@pytest.mark.asyncio
+async def test_fake_live_schedule_stops_all_agents_after_success():
+    service = mas_service.MASTimetableService(
+        make_problem(),
+        live_xmpp=True,
+    )
+
+    result = await service.schedule()
+
+    assert result["mode"] == "live_xmpp"
+    assert len(FakeAgent.stopped) == 4
+    assert len(set(FakeAgent.stopped)) == 4
+
+
+@pytest.mark.asyncio
+async def test_fake_live_negotiation_failure_stops_started_agents():
+    FakeCoordinator.negotiation_success = False
     service = mas_service.MASTimetableService(
         make_problem(),
         live_xmpp=True,
@@ -223,8 +250,8 @@ async def test_schedule_fails_when_negotiation_is_rejected():
     ):
         await service.schedule()
 
-    # Started agents must still be stopped after negotiation fails.
     assert len(FakeAgent.stopped) == 4
+    assert len(set(FakeAgent.stopped)) == 4
 
 
 @pytest.mark.asyncio

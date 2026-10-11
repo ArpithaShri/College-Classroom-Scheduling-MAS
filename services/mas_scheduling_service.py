@@ -21,6 +21,20 @@ logger = logging.getLogger(__name__)
 class MASSchedulingError(RuntimeError):
     """Raised when scheduling or agent negotiation fails."""
 
+    def __init__(
+        self,
+        message: str,
+        statistics: Optional[Dict[str, Any]] = None,
+        conflicts: Optional[List[Any]] = None,
+    ):
+        super().__init__(message)
+        self.statistics = statistics
+        self.conflicts = conflicts
+
+
+class MASAgentStartupError(MASSchedulingError):
+    """Raised when a configured live SPADE agent cannot start."""
+
 
 class MASTimetableService:
     """Run CSP scheduling and negotiate assignments through agents."""
@@ -85,7 +99,7 @@ class MASTimetableService:
                 ),
                 available_slots=getattr(
                     faculty, "available_slots", None
-                ),
+                ) or None,
                 preferred_slots=getattr(
                     faculty, "preferred_slots", None
                 ),
@@ -117,7 +131,7 @@ class MASTimetableService:
                 ),
                 available_slots=getattr(
                     room, "available_slots", None
-                ),
+                ) or None,
             )
 
             self.classroom_agents[room.id] = agent
@@ -135,9 +149,7 @@ class MASTimetableService:
                     group, "name", str(group.id)
                 ),
                 size=getattr(group, "size", 0),
-                commitments=getattr(
-                    group, "commitments", None
-                ),
+                commitments=getattr(group, "commitments", None) or None,
             )
 
             self.student_group_agents[group.id] = agent
@@ -156,7 +168,10 @@ class MASTimetableService:
                 self.started_agents.append(agent)
                 logger.info("Started SPADE agent %s", agent.jid)
             except Exception as exc:
-                raise MASSchedulingError(
+                is_alive = getattr(agent, "is_alive", None)
+                if callable(is_alive) and is_alive():
+                    self.started_agents.append(agent)
+                raise MASAgentStartupError(
                     f"Could not start SPADE agent {agent.jid}. "
                     "Check the XMPP server, JID domain, credentials, "
                     "and account registration settings."
@@ -164,16 +179,22 @@ class MASTimetableService:
 
     async def _stop_agents(self) -> None:
         """Stop every agent that successfully started."""
+        failures = []
         for agent in reversed(self.started_agents):
             try:
                 await agent.stop()
                 logger.info("Stopped SPADE agent %s", agent.jid)
-            except Exception:
+            except Exception as exc:
+                failures.append(exc)
                 logger.exception(
                     "Failed to stop SPADE agent %s", agent.jid
                 )
 
         self.started_agents.clear()
+        if failures:
+            raise MASSchedulingError(
+                f"Could not stop {len(failures)} started SPADE agent(s)."
+            ) from failures[0]
 
     async def schedule(self) -> Dict[str, Any]:
         """Generate and negotiate a timetable without database persistence."""
@@ -185,7 +206,9 @@ class MASTimetableService:
 
         if not csp_result.success:
             raise MASSchedulingError(
-                "The CSP scheduler could not find a feasible timetable."
+                "The CSP scheduler could not find a feasible timetable.",
+                statistics=getattr(csp_result, "statistics", None),
+                conflicts=getattr(csp_result, "conflicts", None),
             )
 
         proposed_assignments = list(csp_result.schedule)
@@ -267,7 +290,7 @@ class MASTimetableService:
                 "agent_count": len(self.agents),
                 "negotiated_count": len(confirmed_assignments),
                 "mode": (
-                    "live_xmpp" if self.live_xmpp else "offline"
+                    "live_xmpp" if self.live_xmpp else "in_process"
                 ),
             }
 

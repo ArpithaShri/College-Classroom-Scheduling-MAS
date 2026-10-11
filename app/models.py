@@ -228,6 +228,10 @@ class StudentGroup(db.Model):
             id=self.id,
             name=self.name,
             existing_schedule=[],
+            commitments={
+                (str(slot[0]), str(slot[1]))
+                for slot in self.commitments
+            },
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -491,4 +495,3 @@ class Substitution(db.Model):
                 self.created_at.isoformat() if self.created_at else None
             ),
         }
-

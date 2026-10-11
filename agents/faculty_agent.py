@@ -17,6 +17,7 @@ from .communication import (
     COUNTER_PROPOSE,
     CONFLICT,
     CONFIRM,
+    CANCEL,
     REASON_FACULTY_UNAVAILABLE,
     REASON_FACULTY_DOUBLE_BOOKED,
     SchedulingMessagePayload,
@@ -36,7 +37,7 @@ class FacultyReceiverBehaviour(CyclicBehaviour):
             performative, payload = agent.record_received_message(msg)
             reply = agent.process_incoming_message(msg.sender, performative, payload)
             if reply:
-                await self.send(reply)
+                await agent.send_reply(self, reply)
 
 
 class FacultyAgent(BaseAgent):
@@ -93,7 +94,11 @@ class FacultyAgent(BaseAgent):
         self, day: str, start_time: str, duration: int
     ) -> Optional[List[str]]:
         """Compute list of consecutive time slots."""
-        if start_time not in DEFAULT_TIME_SLOTS:
+        if (
+            day not in DEFAULT_DAYS
+            or duration < 1
+            or start_time not in DEFAULT_TIME_SLOTS
+        ):
             return None
         idx = DEFAULT_TIME_SLOTS.index(start_time)
         if idx + duration > len(DEFAULT_TIME_SLOTS):
@@ -206,6 +211,15 @@ class FacultyAgent(BaseAgent):
         start_time = payload.get("start_time", "")
         duration = int(payload.get("duration", 1))
 
+        is_valid, reason, _ = self.validate_slot(
+            day, start_time, duration, course_id
+        )
+        if not is_valid:
+            resp_payload = dict(payload)
+            resp_payload["status"] = "REJECTED"
+            resp_payload["reason"] = reason or REASON_FACULTY_UNAVAILABLE
+            return REJECT, resp_payload
+
         slots = self.get_consecutive_slots(day, start_time, duration)
         if slots:
             for slot in slots:
@@ -218,6 +232,21 @@ class FacultyAgent(BaseAgent):
         resp_payload["status"] = "CONFIRMED"
         return ACCEPT, resp_payload
 
+    def handle_cancel(self, payload: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
+        """Remove this course's provisional booking after failed consensus."""
+        course_id = payload.get("course_id", "")
+        day = payload.get("day", "")
+        start_time = payload.get("start_time", "")
+        duration = int(payload.get("duration", 1))
+
+        for slot in self.get_consecutive_slots(day, start_time, duration) or []:
+            if self.existing_assignments.get((day, slot)) == course_id:
+                del self.existing_assignments[(day, slot)]
+
+        response = dict(payload)
+        response["status"] = "CANCELLED"
+        return ACCEPT, response
+
     def process_incoming_message(
         self, sender: Any, performative: str, payload: Dict[str, Any]
     ) -> Optional[Message]:
@@ -226,9 +255,51 @@ class FacultyAgent(BaseAgent):
 
         if p_upper == PROPOSE:
             resp_type, resp_payload = self.handle_propose(payload)
-            return self.make_message(to=str(sender), performative=resp_type, payload=resp_payload)
+            self.log_communication(
+                direction="DECISION",
+                sender=str(self.jid),
+                receiver=str(sender),
+                performative=resp_type,
+                payload=resp_payload,
+                status=resp_type,
+            )
+            return self.make_message(
+                to=str(sender),
+                performative=resp_type,
+                payload=resp_payload,
+                thread=payload.get("correlation_id"),
+            )
         elif p_upper == CONFIRM:
             resp_type, resp_payload = self.handle_confirm(payload)
-            return self.make_message(to=str(sender), performative=resp_type, payload=resp_payload)
+            self.log_communication(
+                direction="DECISION",
+                sender=str(self.jid),
+                receiver=str(sender),
+                performative=resp_type,
+                payload=resp_payload,
+                status=resp_type,
+            )
+            return self.make_message(
+                to=str(sender),
+                performative=resp_type,
+                payload=resp_payload,
+                thread=payload.get("correlation_id"),
+            )
+        elif p_upper == CANCEL:
+            resp_type, resp_payload = self.handle_cancel(payload)
+            self.log_communication(
+                direction="DECISION",
+                sender=str(self.jid),
+                receiver=str(sender),
+                performative=resp_type,
+                payload=resp_payload,
+                status=resp_type,
+            )
+            return self.make_message(
+                to=str(sender),
+                performative=resp_type,
+                payload=resp_payload,
+                thread=payload.get("correlation_id"),
+            )
 
         return None

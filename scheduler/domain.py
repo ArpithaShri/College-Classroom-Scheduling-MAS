@@ -126,13 +126,20 @@ class StudentGroup:
     id: str
     name: str
     existing_schedule: List[Dict[str, Any]] = field(default_factory=list)
+    commitments: Set[Tuple[str, str]] = field(default_factory=set)
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "StudentGroup":
+        commitments = set()
+        for value in data.get("commitments", []):
+            slot = TimeSlot.from_str_or_tuple(value)
+            commitments.add((slot.day, slot.time))
+
         return cls(
             id=data["id"],
             name=data.get("name", data["id"]),
             existing_schedule=list(data.get("existing_schedule", [])),
+            commitments=commitments,
         )
 
 
@@ -216,7 +223,11 @@ class SchedulingProblem:
 
     def get_consecutive_slots(self, day: str, start_time: str, duration: int) -> Optional[List[str]]:
         """Return the list of consecutive time slot strings if they fit in the day, or None."""
-        if start_time not in self.time_slots:
+        if (
+            day not in self.days
+            or duration < 1
+            or start_time not in self.time_slots
+        ):
             return None
         start_idx = self.time_slots.index(start_time)
         if start_idx + duration > len(self.time_slots):

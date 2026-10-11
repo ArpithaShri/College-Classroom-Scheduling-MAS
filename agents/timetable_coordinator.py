@@ -10,10 +10,10 @@ The central coordinating agent orchestrating multi-agent negotiation:
 5. Issues confirmations (CONFIRM / FINAL_ACCEPT) once all autonomous agents reach consensus.
 """
 
-from typing import Optional, List, Dict, Tuple, Set, Any, Union
-import logging
+import asyncio
+import uuid
+from typing import Optional, List, Dict, Tuple, Set, Any
 from spade.behaviour import CyclicBehaviour
-from spade.message import Message
 
 from .base_agent import BaseAgent
 from .communication import (
@@ -23,42 +23,167 @@ from .communication import (
     CHECK_TIMETABLE,
     ACCEPT,
     REJECT,
-    COUNTER_PROPOSE,
-    CONFLICT,
     RESCHEDULE,
     CONFIRM,
+    CANCEL,
     FINAL_ACCEPT,
-    REASON_NO_FEASIBLE_SLOT,
-    SchedulingMessagePayload,
     parse_spade_message,
 )
 from scheduler.domain import (
     SchedulingProblem,
     Course,
-    Faculty,
-    Room,
-    StudentGroup,
     ScheduleValue,
     Assignment,
     generate_course_domain,
-    DEFAULT_DAYS,
-    DEFAULT_TIME_SLOTS,
 )
 from scheduler.constraints import HardConstraintValidator, SoftConstraintEvaluator, UtilityWeights
 from scheduler.csp_solver import CSPScheduler
 
 
+class AgentCommunicationError(RuntimeError):
+    """Raised when a live agent exchange cannot be verified."""
+
+
 class CoordinatorRequestHandler(CyclicBehaviour):
-    """Cyclic behaviour processing incoming REQUEST messages from Department agents."""
+    """Receives coordinator requests and correlated agent responses."""
 
     async def run(self):
         msg = await self.receive(timeout=1.0)
-        if msg:
-            agent: "TimetableCoordinatorAgent" = self.agent
-            performative, payload = agent.record_received_message(msg)
-            if performative.upper() == REQUEST:
-                # Coordinate with the other agents
-                await agent.coordinate_request(msg.sender, payload)
+        if msg is None:
+            return
+
+        agent: "TimetableCoordinatorAgent" = self.agent
+        performative, payload = agent.record_received_message(msg)
+        if performative == REQUEST:
+            task = asyncio.create_task(
+                agent.coordinate_request(
+                    msg.sender, payload, behavior=self
+                )
+            )
+            agent._request_tasks.add(task)
+
+            def report_request_failure(done_task: asyncio.Task) -> None:
+                agent._request_tasks.discard(done_task)
+                try:
+                    done_task.result()
+                except Exception as exc:
+                    agent.logger.error(
+                        "Coordinator request failed",
+                        exc_info=(type(exc), exc, exc.__traceback__),
+                    )
+
+            task.add_done_callback(report_request_failure)
+            return
+
+        correlation_id = str(payload.get("correlation_id", ""))
+        pending = agent._pending_replies.get(correlation_id)
+        if pending is None:
+            agent.log_communication(
+                direction="LIVE",
+                sender=str(msg.sender or "UNKNOWN"),
+                receiver=str(msg.to or agent.jid),
+                performative=performative,
+                payload=payload,
+                status="UNMATCHED",
+                reason="No pending request has this correlation ID",
+            )
+            return
+
+        expected_sender, future = pending
+        expected_recipient = str(agent.jid)
+        if (
+            not msg.sender
+            or not msg.to
+            or agent._bare_jid(msg.sender) != agent._bare_jid(expected_sender)
+            or agent._bare_jid(msg.to) != agent._bare_jid(expected_recipient)
+            or msg.thread != correlation_id
+        ):
+            agent.log_communication(
+                direction="LIVE",
+                sender=str(msg.sender or "UNKNOWN"),
+                receiver=str(msg.to or agent.jid),
+                performative=performative,
+                payload=payload,
+                status="UNMATCHED",
+                reason="Sender, recipient, or correlation ID did not match",
+            )
+            return
+
+        if not future.done():
+            future.set_result((performative, payload))
+
+    async def send_and_wait(
+        self,
+        to_jid: str,
+        performative: str,
+        payload: Dict[str, Any],
+        timeout: float,
+    ) -> Tuple[str, Dict[str, Any]]:
+        """Send over SPADE and wait for the matching agent reply."""
+        agent: "TimetableCoordinatorAgent" = self.agent
+        correlation_id = str(uuid.uuid4())
+        request_payload = dict(payload)
+        request_payload["correlation_id"] = correlation_id
+        msg = agent.make_message(
+            to=to_jid,
+            performative=performative,
+            payload=request_payload,
+            thread=correlation_id,
+        )
+        future = asyncio.get_running_loop().create_future()
+        agent._pending_replies[correlation_id] = (to_jid, future)
+
+        agent.log_communication(
+            direction="SENT",
+            sender=str(agent.jid),
+            receiver=to_jid,
+            performative=performative,
+            payload=request_payload,
+            status="ATTEMPTED",
+        )
+        try:
+            try:
+                await self.send(msg)
+            except Exception as exc:
+                agent.log_communication(
+                    direction="SENT",
+                    sender=str(agent.jid),
+                    receiver=to_jid,
+                    performative=performative,
+                    payload=request_payload,
+                    status="FAILED",
+                    reason=str(exc),
+                )
+                raise AgentCommunicationError(
+                    f"Could not transmit {performative} to {to_jid}"
+                ) from exc
+
+            agent.log_communication(
+                direction="SENT",
+                sender=str(agent.jid),
+                receiver=to_jid,
+                performative=performative,
+                payload=request_payload,
+                status="TRANSMITTED",
+            )
+            try:
+                return await asyncio.wait_for(future, timeout=timeout)
+            except asyncio.TimeoutError as exc:
+                agent.log_communication(
+                    direction="LIVE",
+                    sender=to_jid,
+                    receiver=str(agent.jid),
+                    performative=performative,
+                    payload=request_payload,
+                    status="TIMEOUT",
+                    reason=f"No correlated reply within {timeout:g} seconds",
+                )
+                raise AgentCommunicationError(
+                    f"Timed out waiting for {to_jid} to reply to "
+                    f"{performative}"
+                ) from exc
+        finally:
+            agent._pending_replies.pop(correlation_id, None)
 
 
 class TimetableCoordinatorAgent(BaseAgent):
@@ -85,12 +210,31 @@ class TimetableCoordinatorAgent(BaseAgent):
 
         # Confirmed assignments history
         self.confirmed_assignments: List[Dict[str, Any]] = []
+        self._message_handler: Optional[CoordinatorRequestHandler] = None
+        self._pending_replies: Dict[str, Tuple[str, Any]] = {}
+        self._request_tasks: Set[asyncio.Task] = set()
 
     async def setup(self):
         """Register CyclicBehaviour on startup."""
         await super().setup()
         handler = CoordinatorRequestHandler()
+        self._message_handler = handler
         self.add_behaviour(handler)
+
+    async def stop(self):
+        """Cancel request tasks before stopping the coordinator agent."""
+        for task in self._request_tasks:
+            task.cancel()
+        if self._request_tasks:
+            await asyncio.gather(
+                *self._request_tasks, return_exceptions=True
+            )
+        self._request_tasks.clear()
+        await super().stop()
+
+    @staticmethod
+    def _bare_jid(jid: Any) -> str:
+        return str(jid or "").split("/", 1)[0]
 
     def register_faculty_agent(self, faculty_id: str, jid: str):
         """Register JID for a Faculty Agent."""
@@ -132,12 +276,6 @@ class TimetableCoordinatorAgent(BaseAgent):
         domain = generate_course_domain(course, self.problem)
 
         # Filter out previously rejected/conflicted candidates
-        valid_candidates = [
-            v for v in domain if (v.room_id, v.day, v.start_time) not in excluded_candidates
-        ]
-
-        # Score candidates with soft constraint evaluator
-        weights = UtilityWeights()
         assigned = [
             Assignment(
                 course_id=c["course_id"],
@@ -153,6 +291,18 @@ class TimetableCoordinatorAgent(BaseAgent):
             )
             for c in self.confirmed_assignments
         ]
+        valid_candidates = [
+            value
+            for value in domain
+            if (value.room_id, value.day, value.start_time)
+            not in excluded_candidates
+            and HardConstraintValidator.is_consistent(
+                course, value, assigned, self.problem
+            )[0]
+        ]
+
+        # Score only candidates that satisfy the current hard constraints.
+        weights = UtilityWeights()
 
         pref_day = course_dict.get("day")
         pref_time = course_dict.get("start_time")
@@ -186,62 +336,83 @@ class TimetableCoordinatorAgent(BaseAgent):
         timeout: float = 2.0,
         direct_target_agent: Optional[BaseAgent] = None,
     ) -> Tuple[str, Dict[str, Any]]:
-        """Transmit a SPADE Message to recipient agent and await response message."""
-        msg = self.make_message(to=to_jid, performative=performative, payload=payload)
+        """Exchange a correlated message, using live transport or explicit simulation."""
+        if self.is_alive():
+            if self._message_handler is None:
+                raise AgentCommunicationError(
+                    "Coordinator is active without a SPADE message handler."
+                )
+            return await self._message_handler.send_and_wait(
+                to_jid=to_jid,
+                performative=performative,
+                payload=payload,
+                timeout=timeout,
+            )
+
+        if direct_target_agent is not None:
+            correlation_id = str(uuid.uuid4())
+            simulated_payload = dict(payload)
+            simulated_payload["correlation_id"] = correlation_id
+            msg = self.make_message(
+                to=to_jid,
+                performative=performative,
+                payload=simulated_payload,
+                thread=correlation_id,
+            )
+            self.log_communication(
+                direction="SIMULATED",
+                sender=str(self.jid),
+                receiver=str(to_jid),
+                performative=performative,
+                payload=simulated_payload,
+                status="SENT",
+            )
+            direct_target_agent.record_received_message(
+                msg, simulated=True
+            )
+            reply_msg = direct_target_agent.process_incoming_message(
+                sender=str(self.jid),
+                performative=performative,
+                payload=simulated_payload,
+            )
+            if reply_msg:
+                resp_perf, resp_payload = parse_spade_message(reply_msg)
+                if (
+                    resp_payload.get("correlation_id") != correlation_id
+                    or self._bare_jid(reply_msg.sender)
+                    != self._bare_jid(direct_target_agent.jid)
+                ):
+                    raise AgentCommunicationError(
+                        "In-process agent returned an uncorrelated response."
+                    )
+                direct_target_agent.log_communication(
+                    direction="SIMULATED",
+                    sender=str(direct_target_agent.jid),
+                    receiver=str(self.jid),
+                    performative=resp_perf,
+                    payload=resp_payload,
+                    status="SENT",
+                )
+                self.log_communication(
+                    direction="SIMULATED",
+                    sender=str(direct_target_agent.jid),
+                    receiver=str(self.jid),
+                    performative=resp_perf,
+                    payload=resp_payload,
+                    status="RECEIVED",
+                )
+                return resp_perf, resp_payload
+
         self.log_communication(
-            direction="SENT",
+            direction="SIMULATED",
             sender=str(self.jid),
             receiver=str(to_jid),
             performative=performative,
             payload=payload,
+            status="NO_TARGET",
+            reason="No in-process agent target is registered",
         )
-
-        # 1. Real SPADE message transmission when agent is live
-        if self.is_alive():
-            try:
-                await self.send(msg)
-            except Exception as e:
-                self.logger.debug(f"Direct spade send error: {e}")
-
-            deadline = asyncio.get_event_loop().time() + timeout
-            while asyncio.get_event_loop().time() < deadline:
-                if hasattr(self, "inbox"):
-                    try:
-                        resp_msg = await asyncio.wait_for(self.inbox.get(), timeout=0.1)
-                        if resp_msg:
-                            resp_perf, resp_payload = self.record_received_message(resp_msg)
-                            return resp_perf, resp_payload
-                    except asyncio.TimeoutError:
-                        pass
-                await asyncio.sleep(0.02)
-
-        # 2. In-process message dispatch fallback for offline unit tests
-        if direct_target_agent is not None:
-            direct_target_agent.record_received_message(msg)
-            reply_msg = direct_target_agent.process_incoming_message(
-                sender=str(self.jid),
-                performative=performative,
-                payload=payload,
-            )
-            if reply_msg:
-                resp_perf, resp_payload = parse_spade_message(reply_msg)
-                direct_target_agent.log_communication(
-                    direction="SENT",
-                    sender=str(direct_target_agent.jid),
-                    receiver=str(self.jid),
-                    performative=resp_perf,
-                    payload=resp_payload,
-                )
-                self.log_communication(
-                    direction="RECEIVED",
-                    sender=str(direct_target_agent.jid),
-                    receiver=str(self.jid),
-                    performative=resp_perf,
-                    payload=resp_payload,
-                )
-                return resp_perf, resp_payload
-
-        return REJECT, {"reason": "No response received"}
+        return REJECT, {"reason": "No in-process agent target is registered"}
 
     async def coordinate_course_negotiation(
         self,
@@ -304,7 +475,11 @@ class TimetableCoordinatorAgent(BaseAgent):
                 "start_time": start_time,
                 "duration": duration,
                 "enrollment": enrollment,
-                "room_type": room_type,
+                "room_type": getattr(
+                    self.problem.get_room(room_id),
+                    "room_type",
+                    room_type,
+                ),
                 "is_lab": is_lab,
             }
 
@@ -327,11 +502,12 @@ class TimetableCoordinatorAgent(BaseAgent):
                 excluded_candidates.add(candidate_tuple)
                 # Reschedule with CSP
                 self.log_communication(
-                    direction="SENT",
+                    direction="APPLICATION",
                     sender=str(self.jid),
                     receiver=str(self.jid),
                     performative=RESCHEDULE,
                     payload={"reason": fac_reason, "failed_candidate": current_proposal},
+                    status="RESCHEDULE",
                 )
                 continue
 
@@ -355,11 +531,12 @@ class TimetableCoordinatorAgent(BaseAgent):
                 excluded_candidates.add(candidate_tuple)
                 # Reschedule with CSP
                 self.log_communication(
-                    direction="SENT",
+                    direction="APPLICATION",
                     sender=str(self.jid),
                     receiver=str(self.jid),
                     performative=RESCHEDULE,
                     payload={"reason": cls_reason, "failed_candidate": current_proposal},
+                    status="RESCHEDULE",
                 )
                 # Refresh CSP candidates excluding failed rooms/slots
                 more_csp = self.get_candidate_values_from_csp(request_payload, excluded_candidates)
@@ -390,11 +567,12 @@ class TimetableCoordinatorAgent(BaseAgent):
                 excluded_candidates.add(candidate_tuple)
                 # Reschedule with CSP
                 self.log_communication(
-                    direction="SENT",
+                    direction="APPLICATION",
                     sender=str(self.jid),
                     receiver=str(self.jid),
                     performative=RESCHEDULE,
                     payload={"reason": sg_reason, "failed_candidate": current_proposal},
+                    status="RESCHEDULE",
                 )
                 # Refresh CSP candidates
                 more_csp = self.get_candidate_values_from_csp(request_payload, excluded_candidates)
@@ -416,16 +594,28 @@ class TimetableCoordinatorAgent(BaseAgent):
             ]
 
             confirmation_failures = []
+            confirmed_targets = []
+            confirmation_attempted_targets = []
 
             for target_jid, target_agent, agent_name in confirmation_targets:
-                response_type, response_payload = await self.send_and_await_reply(
-                    to_jid=target_jid,
-                    performative=CONFIRM,
-                    payload=final_schedule,
-                    direct_target_agent=target_agent,
-                )
+                target = (target_jid, target_agent, agent_name)
+                confirmation_attempted_targets.append(target)
+                try:
+                    response_type, response_payload = await self.send_and_await_reply(
+                        to_jid=target_jid,
+                        performative=CONFIRM,
+                        payload=final_schedule,
+                        direct_target_agent=target_agent,
+                    )
+                except Exception:
+                    await self._cancel_confirmed_targets(
+                        confirmation_attempted_targets, final_schedule
+                    )
+                    raise
 
-                if response_type != ACCEPT:
+                if response_type == ACCEPT:
+                    confirmed_targets.append(target)
+                else:
                     confirmation_failures.append({
                         "agent": agent_name,
                         "response": response_type,
@@ -435,8 +625,11 @@ class TimetableCoordinatorAgent(BaseAgent):
                     })
 
             if confirmation_failures:
+                await self._cancel_confirmed_targets(
+                    confirmed_targets, final_schedule
+                )
                 self.log_communication(
-                    direction="SENT",
+                    direction="APPLICATION",
                     sender=str(self.jid),
                     receiver=str(self.jid),
                     performative=RESCHEDULE,
@@ -445,32 +638,81 @@ class TimetableCoordinatorAgent(BaseAgent):
                         "failed_candidate": final_schedule,
                         "confirmation_failures": confirmation_failures,
                     },
+                    status="RESCHEDULE",
                 )
                 self.logger.warning(
                     "Confirmation failed for %s: %s",
                     course_id,
                     confirmation_failures,
                 )
-                return (
-                    False,
-                    None,
-                    "Agent confirmation failed; assignment was not finalized.",
+                excluded_candidates.add(candidate_tuple)
+                more_csp = self.get_candidate_values_from_csp(
+                    request_payload, excluded_candidates
                 )
+                for value in more_csp:
+                    alternative = (value.room_id, value.day, value.start_time)
+                    if alternative not in candidates and alternative not in excluded_candidates:
+                        candidates.append(alternative)
+                continue
 
             self.confirmed_assignments.append(final_schedule)
 
             self.log_communication(
-                direction="SENT",
+                direction="APPLICATION",
                 sender=str(self.jid),
                 receiver=str(self.jid),
                 performative=FINAL_ACCEPT,
                 payload=final_schedule,
+                status="SCHEDULED",
             )
 
             return True, final_schedule, "Consensus reached across all agents."
 
+        return (
+            False,
+            None,
+            "No candidate passed agent negotiation and confirmation.",
+        )
 
-    async def coordinate_request(self, sender: Any, payload: Dict[str, Any]):
+    async def _cancel_confirmed_targets(
+        self,
+        targets: List[Tuple[str, Optional[BaseAgent], str]],
+        assignment: Dict[str, Any],
+    ) -> None:
+        """Compensate local agent bookings before abandoning a proposal."""
+        cancellation_failures = []
+        for target_jid, target_agent, agent_name in targets:
+            try:
+                response_type, response_payload = await self.send_and_await_reply(
+                    to_jid=target_jid,
+                    performative=CANCEL,
+                    payload=assignment,
+                    direct_target_agent=target_agent,
+                )
+            except Exception as exc:
+                cancellation_failures.append(f"{agent_name}: {exc}")
+                continue
+
+            if response_type != ACCEPT:
+                cancellation_failures.append(
+                    response_payload.get(
+                        "reason", f"{agent_name} did not cancel its booking"
+                    )
+                )
+
+        if cancellation_failures:
+            raise AgentCommunicationError(
+                "Could not safely release all provisional agent bookings: "
+                + "; ".join(cancellation_failures)
+            )
+
+
+    async def coordinate_request(
+        self,
+        sender: Any,
+        payload: Dict[str, Any],
+        behavior: Optional[CoordinatorRequestHandler] = None,
+    ):
         """Asynchronously coordinate request when received through SPADE message loop."""
         success, final_assignment, reason = await self.coordinate_course_negotiation(payload)
         resp_payload = final_assignment or {
@@ -483,4 +725,5 @@ class TimetableCoordinatorAgent(BaseAgent):
             to=str(sender),
             performative=performative,
             payload=resp_payload,
+            behavior=behavior,
         )

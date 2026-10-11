@@ -48,6 +48,7 @@ class SendCourseRequestBehaviour(OneShotBehaviour):
             to=agent.coordinator_jid,
             performative=REQUEST,
             payload=self.request_payload,
+            behavior=self,
         )
 
 
@@ -136,7 +137,7 @@ class DepartmentAgent(BaseAgent):
         return payload
 
     async def request_schedule_course(
-        self, course_id: str
+        self, course_id: str, behavior: Any = None
     ) -> Optional[Message]:
         """Send a scheduling request for a registered course to the coordinator."""
         payload = self.build_scheduling_request(course_id)
@@ -149,6 +150,7 @@ class DepartmentAgent(BaseAgent):
             to=self.coordinator_jid,
             performative=REQUEST,
             payload=payload,
+            behavior=behavior,
         )
         return msg
 

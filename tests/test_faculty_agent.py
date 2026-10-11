@@ -98,3 +98,24 @@ def test_faculty_agent_handle_propose_and_confirm():
     conf_type, conf_payload = agent.handle_confirm(proposal)
     assert conf_type == ACCEPT
     assert agent.existing_assignments[("Monday", "10:00")] == "CS301"
+
+
+def test_faculty_confirmation_rechecks_for_new_conflicts():
+    agent = FacultyAgent(
+        jid="faculty_f001@localhost",
+        faculty_id="F001",
+        available_slots=[TimeSlot("Monday", "10:00")],
+    )
+    proposal = {
+        "course_id": "CS301",
+        "day": "Monday",
+        "start_time": "10:00",
+        "duration": 1,
+    }
+    agent.existing_assignments[("Monday", "10:00")] = "CSOTHER"
+
+    response, payload = agent.handle_confirm(proposal)
+
+    assert response == REJECT
+    assert payload["status"] == "REJECTED"
+    assert agent.existing_assignments[("Monday", "10:00")] == "CSOTHER"

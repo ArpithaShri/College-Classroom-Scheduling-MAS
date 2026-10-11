@@ -3,10 +3,11 @@
 import pytest
 
 from app import create_app
-from app.models import Assignment, Timetable
+from app.models import AgentAuditLog, Assignment, Timetable
 from database.db import db
 from database.seed_data import seed_database
 from sqlalchemy.orm import Session
+from agents.timetable_coordinator import TimetableCoordinatorAgent
 
 
 @pytest.fixture
@@ -59,6 +60,7 @@ def test_failed_timetable_commit_rolls_back_database_changes(
 
     with integration_app.app_context():
         original_count = Timetable.query.count()
+        original_assignment_count = Assignment.query.count()
         monkeypatch.setattr(Session, "commit", fail_commit)
 
         response = client.post(
@@ -71,7 +73,46 @@ def test_failed_timetable_commit_rolls_back_database_changes(
 
         # The endpoint must roll back the partially created timetable.
         assert Timetable.query.count() == original_count
+        assert Assignment.query.count() == original_assignment_count
         assert Timetable.query.filter_by(name="Must Roll Back").first() is None
+
+
+def test_negotiation_failure_does_not_persist_timetable(
+    client, integration_app, monkeypatch
+):
+    async def reject_negotiation(self, request_payload, **kwargs):
+        return False, None, "Faculty rejected every feasible candidate"
+
+    monkeypatch.setattr(
+        TimetableCoordinatorAgent,
+        "coordinate_course_negotiation",
+        reject_negotiation,
+    )
+
+    with integration_app.app_context():
+        original_count = Timetable.query.count()
+        original_assignment_count = Assignment.query.count()
+
+    response = client.post(
+        "/api/schedule/generate",
+        json={"name": "Must Not Persist"},
+    )
+
+    assert response.status_code == 409
+    assert response.get_json()["success"] is False
+    with integration_app.app_context():
+        assert Timetable.query.count() == original_count
+        assert Assignment.query.count() == original_assignment_count
+        assert (
+            Timetable.query.filter_by(name="Must Not Persist").first()
+            is None
+        )
+        failure_event = AgentAuditLog.query.filter_by(
+            message_type="SCHEDULE_OUTCOME",
+            status="APPLICATION:SCHEDULING_REJECTED",
+        ).first()
+        assert failure_event is not None
+        assert failure_event.payload["mode"] == "in_process"
 
 
 def test_reschedule_proposal_does_not_silently_change_existing_assignment(client):

@@ -19,6 +19,10 @@ class Config:
     # XMPP / SPADE Server Configuration (Default to local or public XMPP server)
     XMPP_SERVER = os.environ.get("XMPP_SERVER", "localhost")
     XMPP_PASSWORD = os.environ.get("XMPP_PASSWORD", "mas_password_2026")
+    XMPP_DOMAIN = os.environ.get("XMPP_DOMAIN", XMPP_SERVER)
+    MAS_LIVE_XMPP = os.environ.get(
+        "MAS_LIVE_XMPP", "false"
+    ).strip().lower() in {"1", "true", "yes", "on"}
 
 
 class DevelopmentConfig(Config):

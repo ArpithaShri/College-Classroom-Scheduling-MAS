@@ -154,6 +154,21 @@ class HardConstraintValidator:
 
         # Check against student group's pre-existing schedule if present
         sg = problem.get_student_group(course.student_group_id)
+        if sg and sg.commitments:
+            candidate_slots = set(
+                cls.get_assigned_slots(
+                    val.day, val.start_time, course.duration, problem
+                )
+            )
+            if any(
+                (val.day, slot) in sg.commitments
+                for slot in candidate_slots
+            ):
+                return False, (
+                    f"H6: Student group {sg.id} has a commitment at "
+                    f"{val.day} during {val.start_time}"
+                )
+
         if sg and sg.existing_schedule:
             candidate_slots = set(cls.get_assigned_slots(val.day, val.start_time, course.duration, problem))
             for item in sg.existing_schedule:

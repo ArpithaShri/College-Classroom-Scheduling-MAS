@@ -6,6 +6,7 @@ lifecycle hooks, and safe shutdown without domain-specific scheduling logic.
 """
 
 import logging
+import uuid
 from typing import Optional, Dict, Any, Union, List, Tuple
 
 from spade.agent import Agent
@@ -123,8 +124,21 @@ class BaseAgent(Agent):
             Union[Dict[str, Any], SchedulingMessagePayload]
         ] = None,
         thread: Optional[str] = None,
+        behavior: Any = None,
     ) -> Message:
-        """Create, log, and asynchronously transmit a SPADE message."""
+        """Send a message using the live SPADE behavior that owns transport."""
+        if behavior is None or getattr(behavior, "agent", None) is not self:
+            raise RuntimeError(
+                "A running SPADE behavior is required to send a live message."
+            )
+        if not self.is_alive():
+            raise RuntimeError("Cannot send a live message from a stopped agent.")
+
+        if isinstance(payload, dict):
+            payload = dict(payload)
+            payload.setdefault("correlation_id", str(uuid.uuid4()))
+            thread = thread or payload["correlation_id"]
+
         msg = self.make_message(
             to=to,
             performative=performative,
@@ -133,6 +147,28 @@ class BaseAgent(Agent):
         )
 
         _, parsed_payload = parse_spade_message(msg)
+        self.log_communication(
+            direction="SENT",
+            sender=str(self.jid),
+            receiver=str(to),
+            performative=performative,
+            payload=parsed_payload,
+            status="ATTEMPTED",
+        )
+
+        try:
+            await behavior.send(msg)
+        except Exception as exc:
+            self.log_communication(
+                direction="SENT",
+                sender=str(self.jid),
+                receiver=str(to),
+                performative=performative,
+                payload=parsed_payload,
+                status="FAILED",
+                reason=str(exc),
+            )
+            raise
 
         self.log_communication(
             direction="SENT",
@@ -140,36 +176,70 @@ class BaseAgent(Agent):
             receiver=str(to),
             performative=performative,
             payload=parsed_payload,
+            status="TRANSMITTED",
         )
-
-        try:
-            # Send only when the SPADE client is available.
-            if (
-                hasattr(self, "client")
-                and self.client
-                and hasattr(self.client, "send")
-            ):
-                await self.send(msg)
-        except Exception as exc:
-            self.logger.debug(
-                "Direct SPADE send encountered: %s",
-                exc,
-            )
 
         return msg
 
+    async def send_reply(
+        self, behavior: Any, msg: Message
+    ) -> None:
+        """Send an agent reply and record transport outcomes accurately."""
+        if behavior is None or getattr(behavior, "agent", None) is not self:
+            raise RuntimeError(
+                "A running SPADE behavior is required to send a live reply."
+            )
+        if not self.is_alive():
+            raise RuntimeError("Cannot send a live reply from a stopped agent.")
+
+        performative, payload = parse_spade_message(msg)
+        sender = str(self.jid)
+        receiver = str(msg.to)
+
+        self.log_communication(
+            direction="SENT",
+            sender=sender,
+            receiver=receiver,
+            performative=performative,
+            payload=payload,
+            status="ATTEMPTED",
+        )
+        try:
+            await behavior.send(msg)
+        except Exception as exc:
+            self.log_communication(
+                direction="SENT",
+                sender=sender,
+                receiver=receiver,
+                performative=performative,
+                payload=payload,
+                status="FAILED",
+                reason=str(exc),
+            )
+            raise
+
+        self.log_communication(
+            direction="SENT",
+            sender=sender,
+            receiver=receiver,
+            performative=performative,
+            payload=payload,
+            status="TRANSMITTED",
+        )
+
     def record_received_message(
-        self, msg: Message
+        self, msg: Message, simulated: bool = False
     ) -> Tuple[str, Dict[str, Any]]:
         """Parse and log an incoming SPADE message."""
         performative, payload = parse_spade_message(msg)
 
         self.log_communication(
-            direction="RECEIVED",
+            direction="SIMULATED" if simulated else "LIVE",
             sender=str(msg.sender or "UNKNOWN"),
             receiver=str(self.jid),
             performative=performative,
             payload=payload,
+            status="RECEIVED",
             reason=payload.get("reason"),
         )
 

@@ -5,7 +5,7 @@ Maintains local state for student commitments and scheduled timetable.
 Validates proposed class timings to avoid timetable clashes for students.
 """
 
-from typing import Optional, List, Dict, Tuple, Set, Any, Union
+from typing import Optional, List, Dict, Tuple, Set, Any
 from spade.behaviour import CyclicBehaviour
 from spade.message import Message
 
@@ -14,15 +14,12 @@ from .communication import (
     CHECK_TIMETABLE,
     PROPOSE,
     ACCEPT,
-    REJECT,
     CONFLICT,
-    COUNTER_PROPOSE,
     CONFIRM,
+    CANCEL,
     REASON_TIMETABLE_OVERLAP,
-    SchedulingMessagePayload,
-    parse_spade_message,
 )
-from scheduler.domain import DEFAULT_DAYS, DEFAULT_TIME_SLOTS
+from scheduler.domain import DEFAULT_DAYS, DEFAULT_TIME_SLOTS, TimeSlot
 
 
 class StudentGroupReceiverBehaviour(CyclicBehaviour):
@@ -35,7 +32,7 @@ class StudentGroupReceiverBehaviour(CyclicBehaviour):
             performative, payload = agent.record_received_message(msg)
             reply = agent.process_incoming_message(msg.sender, performative, payload)
             if reply:
-                await self.send(reply)
+                await agent.send_reply(self, reply)
 
 
 class StudentGroupAgent(BaseAgent):
@@ -62,9 +59,10 @@ class StudentGroupAgent(BaseAgent):
         self.existing_timetable: Dict[Tuple[str, str], str] = (
             dict(existing_timetable) if existing_timetable else {}
         )
-        self.commitments: Set[Tuple[str, str]] = (
-            set(commitments) if commitments else set()
-        )
+        self.commitments: Set[Tuple[str, str]] = set()
+        for value in commitments or set():
+            slot = TimeSlot.from_str_or_tuple(value)
+            self.commitments.add((slot.day, slot.time))
 
     async def setup(self):
         """Register CyclicBehaviour on startup."""
@@ -76,7 +74,13 @@ class StudentGroupAgent(BaseAgent):
         self, day: str, start_time: str, duration: int
     ) -> Optional[List[str]]:
         """Compute list of consecutive time slots."""
-        if start_time not in DEFAULT_TIME_SLOTS:
+        if (
+            day not in DEFAULT_DAYS
+            or not isinstance(duration, int)
+            or isinstance(duration, bool)
+            or duration <= 0
+            or start_time not in DEFAULT_TIME_SLOTS
+        ):
             return None
         idx = DEFAULT_TIME_SLOTS.index(start_time)
         if idx + duration > len(DEFAULT_TIME_SLOTS):
@@ -181,6 +185,19 @@ class StudentGroupAgent(BaseAgent):
         start_time = payload.get("start_time", "")
         duration = int(payload.get("duration", 1))
 
+        is_valid, reason, _ = self.validate_timetable(
+            day=day,
+            start_time=start_time,
+            duration=duration,
+            course_id=course_id,
+            course_name=course_name,
+        )
+        if not is_valid:
+            resp_payload = dict(payload)
+            resp_payload["status"] = "REJECTED"
+            resp_payload["reason"] = reason or REASON_TIMETABLE_OVERLAP
+            return CONFLICT, resp_payload
+
         slots = self.get_consecutive_slots(day, start_time, duration)
         if slots:
             for slot in slots:
@@ -193,6 +210,23 @@ class StudentGroupAgent(BaseAgent):
         resp_payload["status"] = "CONFIRMED"
         return ACCEPT, resp_payload
 
+    def handle_cancel(self, payload: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
+        """Remove this course's provisional booking after failed consensus."""
+        course_id = payload.get("course_id", "")
+        course_name = payload.get("course_name", course_id)
+        day = payload.get("day", "")
+        start_time = payload.get("start_time", "")
+        duration = int(payload.get("duration", 1))
+
+        for slot in self.get_consecutive_slots(day, start_time, duration) or []:
+            existing = self.existing_timetable.get((day, slot))
+            if existing in {course_id, course_name}:
+                del self.existing_timetable[(day, slot)]
+
+        response = dict(payload)
+        response["status"] = "CANCELLED"
+        return ACCEPT, response
+
     def process_incoming_message(
         self, sender: Any, performative: str, payload: Dict[str, Any]
     ) -> Optional[Message]:
@@ -201,9 +235,51 @@ class StudentGroupAgent(BaseAgent):
 
         if p_upper in (CHECK_TIMETABLE, PROPOSE):
             resp_type, resp_payload = self.handle_check_timetable_or_propose(payload)
-            return self.make_message(to=str(sender), performative=resp_type, payload=resp_payload)
+            self.log_communication(
+                direction="DECISION",
+                sender=str(self.jid),
+                receiver=str(sender),
+                performative=resp_type,
+                payload=resp_payload,
+                status=resp_type,
+            )
+            return self.make_message(
+                to=str(sender),
+                performative=resp_type,
+                payload=resp_payload,
+                thread=payload.get("correlation_id"),
+            )
         elif p_upper == CONFIRM:
             resp_type, resp_payload = self.handle_confirm(payload)
-            return self.make_message(to=str(sender), performative=resp_type, payload=resp_payload)
+            self.log_communication(
+                direction="DECISION",
+                sender=str(self.jid),
+                receiver=str(sender),
+                performative=resp_type,
+                payload=resp_payload,
+                status=resp_type,
+            )
+            return self.make_message(
+                to=str(sender),
+                performative=resp_type,
+                payload=resp_payload,
+                thread=payload.get("correlation_id"),
+            )
+        elif p_upper == CANCEL:
+            resp_type, resp_payload = self.handle_cancel(payload)
+            self.log_communication(
+                direction="DECISION",
+                sender=str(self.jid),
+                receiver=str(sender),
+                performative=resp_type,
+                payload=resp_payload,
+                status=resp_type,
+            )
+            return self.make_message(
+                to=str(sender),
+                performative=resp_type,
+                payload=resp_payload,
+                thread=payload.get("correlation_id"),
+            )
 
         return None

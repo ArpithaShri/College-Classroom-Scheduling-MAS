@@ -95,3 +95,26 @@ def test_classroom_agent_allocate_and_confirm():
 
     agent.handle_confirm(req)
     assert agent.current_bookings[("Monday", "10:00")] == "CS301"
+
+
+def test_classroom_confirmation_rechecks_capacity_and_occupancy():
+    agent = ClassroomAgent(
+        jid="classroom_r102@localhost",
+        room_id="R102",
+        capacity=65,
+    )
+    proposal = {
+        "course_id": "CS301",
+        "day": "Monday",
+        "start_time": "10:00",
+        "duration": 1,
+        "enrollment": 55,
+        "room_type": "classroom",
+    }
+    agent.current_bookings[("Monday", "10:00")] = "CSOTHER"
+
+    response, payload = agent.handle_confirm(proposal)
+
+    assert response == REJECT
+    assert payload["status"] == "REJECTED"
+    assert agent.current_bookings[("Monday", "10:00")] == "CSOTHER"

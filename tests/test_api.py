@@ -339,8 +339,33 @@ def test_schedule_generation_happy_path(client: FlaskClient, app: Flask):
     assert data["success"] is True
     assert data["timetable_id"] is not None
     assert data["status"] == "SCHEDULED"
+    assert data["mode"] == "in_process"
     assert "fitness_score" in data
     assert len(data["assignments"]) == 4
+
+    audit_response = client.get("/api/agent-logs")
+    assert audit_response.status_code == 200
+    audit_statuses = {
+        entry["status"] for entry in audit_response.get_json()["logs"]
+    }
+    assert "SIMULATED:RECEIVED" in audit_statuses
+    assert "SIMULATED:SENT" in audit_statuses
+    assert "SENT" not in audit_statuses
+    assert "DECISION:ACCEPT" in audit_statuses
+    assert "APPLICATION:SCHEDULED" in audit_statuses
+    audit_logs = audit_response.get_json()["logs"]
+    simulated_sends = {
+        entry["payload"].get("correlation_id")
+        for entry in audit_logs
+        if entry["status"] == "SIMULATED:SENT"
+    }
+    simulated_receives = {
+        entry["payload"].get("correlation_id")
+        for entry in audit_logs
+        if entry["status"] == "SIMULATED:RECEIVED"
+    }
+    assert None not in simulated_sends
+    assert simulated_sends & simulated_receives
 
     # Verify assignments fields
     first_asgn = data["assignments"][0]
@@ -456,3 +481,16 @@ def test_rescheduling_nonexistent_course(client: FlaskClient):
     resp = client.post("/api/schedule/reschedule", json={"course_id": "NONEXISTENT_COURSE"})
     assert resp.status_code == 404
     assert resp.get_json()["success"] is False
+
+
+def test_rescheduling_rejects_unknown_timetable(client: FlaskClient, app: Flask):
+    with app.app_context():
+        seed_database()
+
+    response = client.post(
+        "/api/schedule/reschedule",
+        json={"course_id": "CS301", "timetable_id": 999999},
+    )
+
+    assert response.status_code == 404
+    assert "Timetable 999999 not found" in response.get_json()["error"]

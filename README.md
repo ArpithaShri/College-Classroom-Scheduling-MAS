@@ -44,8 +44,11 @@ pytest -v
 
 ## 🌐 XMPP / SPADE Runtime Configuration
 
-- **Local Development / Offline Mode**: Uses SPADE's agent abstractions and in-memory event dispatching alongside optional in-process `pyjabber` local server for complete zero-dependency offline development.
-- **External XMPP Server**: If using an external Prosody / Ejabberd server, configure `XMPP_SERVER` and `XMPP_PASSWORD` in `config.py` or `.env`.
+- **Default API mode**: `POST /api/schedule/generate` runs the CSP and simulates agent message exchanges in-process. The response identifies this as `"mode": "in_process"`; audit statuses use `SIMULATED` rather than asserting XMPP delivery.
+- **Live XMPP mode**: Set `MAS_LIVE_XMPP=true`, `XMPP_DOMAIN` to the reachable XMPP server domain, and `XMPP_PASSWORD` to the agent account password before starting Flask. Agents use account JIDs such as `coordinator_main@<XMPP_DOMAIN>` and `faculty_F001@<XMPP_DOMAIN>`; those accounts must be registered or permitted to auto-register, and the server must be reachable from the application host.
+- `XMPP_SERVER` is retained as the default for `XMPP_DOMAIN`. Successful calls to SPADE's send method are audited as `TRANSMITTED`; a matching correlated reply is separately audited as `RECEIVED`. Only those received replies establish that the responding agent participated.
+- If any agent rejects final confirmation, the coordinator cancels provisional bookings already accepted by other agents before trying a different CSP-valid candidate.
+- Live-XMPP operation is opt-in. When server connectivity, account registration, or credentials are unavailable, generation fails without switching to in-process mode. Live delivery can be exercised with the opt-in test in `tests/test_live_xmpp_integration.py` by setting `MAS_XMPP_INTEGRATION=1`, `XMPP_DOMAIN`, and `XMPP_PASSWORD`.
 
 ---
 
@@ -79,7 +82,7 @@ The server starts by default at `http://127.0.0.1:5000` with the SQLite database
 | | `GET`, `PUT`, `DELETE` | `/api/courses/<id>` | Read, update, delete course |
 | **Timetables** | `GET` | `/api/timetables` | List all generated timetables |
 | | `GET`, `DELETE` | `/api/timetables/<id>` | Retrieve full timetable / Delete timetable |
-| **Scheduling** | `POST` | `/api/schedule/generate` | Generate optimal schedule with CSP engine |
+| **Scheduling** | `POST` | `/api/schedule/generate` | Generate CSP proposals, negotiate with scheduling agents, and persist confirmed assignments |
 | **Rescheduling** | `POST` | `/api/schedule/reschedule` | Propose alternative slot on conflict |
 
 ### Example: Generate a Timetable
@@ -189,4 +192,3 @@ College-Classroom-Scheduling-MAS/
 
 ## 📄 License
 Academic Final Year Project - All Rights Reserved.
-

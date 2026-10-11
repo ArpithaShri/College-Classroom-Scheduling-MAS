@@ -46,6 +46,65 @@ def test_student_group_agent_timetable_clash():
     assert len(alts) > 0
 
 
+def test_student_group_agent_commitments_are_enforced():
+    agent = StudentGroupAgent(
+        jid="studentgroup_csea@localhost",
+        group_id="CSE-A",
+        commitments={("Monday", "10:00")},
+    )
+
+    valid, reason, _ = agent.validate_timetable(
+        "Monday", "10:00", duration=1
+    )
+
+    assert valid is False
+    assert "commitment" in reason.lower()
+
+
+def test_student_group_agent_rejects_invalid_day_and_duration():
+    agent = StudentGroupAgent(
+        jid="studentgroup_csea@localhost",
+        group_id="CSE-A",
+    )
+
+    invalid_day = agent.validate_timetable("Sunday", "10:00")
+    zero_duration = agent.validate_timetable(
+        "Monday", "10:00", duration=0
+    )
+    negative_duration = agent.validate_timetable(
+        "Monday", "10:00", duration=-1
+    )
+    out_of_bounds_duration = agent.validate_timetable(
+        "Monday", "16:00", duration=2
+    )
+
+    assert invalid_day[0] is False
+    assert zero_duration[0] is False
+    assert negative_duration[0] is False
+    assert out_of_bounds_duration[0] is False
+
+
+def test_student_group_confirmation_rechecks_for_new_conflicts():
+    agent = StudentGroupAgent(
+        jid="studentgroup_csea@localhost",
+        group_id="CSE-A",
+    )
+    proposal = {
+        "course_id": "CS301",
+        "course_name": "Machine Learning",
+        "day": "Monday",
+        "start_time": "10:00",
+        "duration": 1,
+    }
+    agent.commitments.add(("Monday", "10:00"))
+
+    response, payload = agent.handle_confirm(proposal)
+
+    assert response == CONFLICT
+    assert payload["status"] == "REJECTED"
+    assert agent.existing_timetable == {}
+
+
 def test_student_group_agent_handle_check_timetable_and_confirm():
     """Verify handle_check_timetable_or_propose and confirm cycle."""
     agent = StudentGroupAgent(
