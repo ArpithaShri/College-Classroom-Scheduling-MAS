@@ -1,4 +1,4 @@
-"""Classroom Agent implementation for SPADE Multi-Agent System.
+﻿"""Classroom Agent implementation for SPADE Multi-Agent System.
 
 Represents an individual physical classroom or laboratory.
 Maintains local state for room capacity, room type, availability, and active bookings.
@@ -38,7 +38,8 @@ class ClassroomReceiverBehaviour(CyclicBehaviour):
             performative, payload = agent.record_received_message(msg)
             reply = agent.process_incoming_message(msg.sender, performative, payload)
             if reply:
-                await agent.send_reply(self, reply)
+                await self.send(reply)
+
 
 
 class ClassroomAgent(BaseAgent):
@@ -310,3 +311,5 @@ class ClassroomAgent(BaseAgent):
             )
 
         return None
+
+

@@ -1,4 +1,4 @@
-"""Student Group Agent implementation for SPADE Multi-Agent System.
+﻿"""Student Group Agent implementation for SPADE Multi-Agent System.
 
 Represents a cohort or section of students (e.g., CSE-A).
 Maintains local state for student commitments and scheduled timetable.
@@ -32,7 +32,8 @@ class StudentGroupReceiverBehaviour(CyclicBehaviour):
             performative, payload = agent.record_received_message(msg)
             reply = agent.process_incoming_message(msg.sender, performative, payload)
             if reply:
-                await agent.send_reply(self, reply)
+                await self.send(reply)
+
 
 
 class StudentGroupAgent(BaseAgent):
@@ -283,3 +284,5 @@ class StudentGroupAgent(BaseAgent):
             )
 
         return None
+
+

@@ -8,7 +8,7 @@ and generates counter-proposals.
 from typing import Optional, List, Dict, Tuple, Set, Any, Union
 from spade.behaviour import CyclicBehaviour
 from spade.message import Message
-
+from agents.communication import parse_spade_message
 from .base_agent import BaseAgent
 from .communication import (
     PROPOSE,
@@ -37,7 +37,7 @@ class FacultyReceiverBehaviour(CyclicBehaviour):
             performative, payload = agent.record_received_message(msg)
             reply = agent.process_incoming_message(msg.sender, performative, payload)
             if reply:
-                await agent.send_reply(self, reply)
+                await self.send(reply)
 
 
 class FacultyAgent(BaseAgent):
