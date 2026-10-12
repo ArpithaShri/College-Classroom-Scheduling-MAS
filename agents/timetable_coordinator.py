@@ -381,16 +381,17 @@ class TimetableCoordinatorAgent(BaseAgent):
     ) -> Tuple[str, Dict[str, Any]]:
         """Transmit a SPADE Message to recipient agent and await response message."""
         msg = self.make_message(to=to_jid, performative=performative, payload=payload)
-        self.log_communication(
-            direction="SENT",
-            sender=str(self.jid),
-            receiver=str(to_jid),
-            performative=performative,
-            payload=payload,
-        )
+       
 
         # 1. Real SPADE message transmission when agent is live
         if self.is_alive():
+            self.log_communication(
+                direction="SENT",
+                sender=str(self.jid),
+                receiver=str(to_jid),
+                performative=performative,
+                payload=payload,
+            )
             try:
                 await self.send(msg)
             except Exception as e:
